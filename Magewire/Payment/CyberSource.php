@@ -232,6 +232,11 @@ class CyberSource extends Form implements EvaluationInterface
 
         $card = $this->cardRepository->getByHash($data['id']);
 
+        if ($card->getMethod() !== static::METHOD_CODE
+            || (int)$card->getCustomerId() !== (int)$this->getQuote()->getCustomerId()) {
+            return;
+        }
+
         $this->addStoredCardToList($card);
     }
 

@@ -90,8 +90,9 @@ $inlineScript = <<<JS
 
                 window.addEventListener('message', this.handleCommunication.bind(this));
                 document.addEventListener('checkout:payment:method-activate', this.toggleOrderButton.bind(this));
-                document.removeEventListener('{$code}InitHostedForm', this.loadHostedForm.bind(this));
-                document.addEventListener('{$code}InitHostedForm', this.loadHostedForm.bind(this));
+                this._boundLoadHostedForm = this._boundLoadHostedForm || this.loadHostedForm.bind(this);
+                document.removeEventListener('{$code}InitHostedForm', this._boundLoadHostedForm);
+                document.addEventListener('{$code}InitHostedForm', this._boundLoadHostedForm);
                 this.\$watch('selectedCard', this.changeSelectedCard.bind(this));
 
                 if (document.querySelectorAll('[wire\\\\:id=checkout\\\\.terms-conditions]').length) {
@@ -139,10 +140,10 @@ $inlineScript = <<<JS
                              ? event.detail.method
                              : document.querySelector('input[name="payment-method-option"]:checked')?.value;
 
-                if (method === '{$code}' && this.showHostedForm) {
-                    document.querySelector('.btn-primary[x-bind~="buttonPlaceOrder"]').style.display = 'none';
-                } else {
-                    document.querySelector('.btn-primary[x-bind~="buttonPlaceOrder"]').style.display = 'block';
+                var orderBtn = document.querySelector('.btn-primary[x-bind~="buttonPlaceOrder"]');
+
+                if (orderBtn) {
+                    orderBtn.style.display = (method === '{$code}' && this.showHostedForm) ? 'none' : 'block';
                 }
             },
             loadHostedForm: function(event) {
@@ -382,9 +383,8 @@ $inlineScript = <<<JS
                 // Use direct fetch() to intercept Payer Auth enrollment failures
                 // before Hyva shows a generic error. hyvaCheckout.order.place()
                 // does not expose failure details needed for the Cardinal 3DS flow.
-                let isGuest = !window.checkoutConfig.customerData?.id;
-                let url = isGuest
-                    ? '/rest/V1/guest-carts/' + window.checkoutConfig.quoteData.entity_id + '/payment-information'
+                let url = this.config.isGuest
+                    ? '/rest/V1/guest-carts/' + this.config.cartId + '/payment-information'
                     : '/rest/V1/carts/mine/payment-information';
 
                 let payload = {
@@ -400,9 +400,8 @@ $inlineScript = <<<JS
                     }
                 };
 
-                if (isGuest) {
-                    payload.email = window.checkoutConfig.quoteData.customer_email
-                                    || document.querySelector('input[name="email"]')?.value;
+                if (this.config.isGuest) {
+                    payload.email = document.querySelector('input[name="email"]')?.value || '';
                 }
 
                 fetch(url, {
@@ -420,9 +419,7 @@ $inlineScript = <<<JS
                     return response.json();
                 })
                 .then(orderId => {
-                    // Order placed successfully -- redirect to success page
-                    window.location.href = window.checkoutConfig.defaultSuccessPageUrl
-                                           || '/checkout/onepage/success/';
+                    window.location.href = this.config.successUrl || '/checkout/onepage/success/';
                 })
                 .catch(error => {
                     let errorMessage = error.message || 'An error occurred placing your order.';
