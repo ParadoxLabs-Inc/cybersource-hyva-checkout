@@ -1,0 +1,28 @@
+{
+    "name": "paradoxlabs/cybersource-hyva-checkout",
+    "description": "CyberSource payment method for Hyva Checkout by ParadoxLabs",
+    "keywords": [
+        "payment",
+        "cybersource",
+        "tokenization"
+    ],
+    "require": {
+        "php": "~8.1.0||~8.2.0||~8.3.0||~8.4.0",
+        "hyva-themes/magento2-hyva-checkout": "^1.3",
+        "hyva-themes/magento2-theme-module": "^1.3.11",
+        "hyva-themes/magento2-payment-icons": ">=2.0",
+        "magento/framework": "*",
+        "paradoxlabs/cybersource": "^2.0.2"
+    },
+    "type": "magento2-module",
+    "version": "1.0.0",
+    "license": "Apache-2.0",
+    "autoload": {
+        "files": [
+            "registration.php"
+        ],
+        "psr-4": {
+            "ParadoxLabs\\CyberSourceHyvaCheckout\\": ""
+        }
+    }
+}

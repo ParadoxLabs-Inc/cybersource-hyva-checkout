@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+    <type name="ParadoxLabs\CyberSourceHyvaCheckout\Magewire\Payment\CyberSource">
+        <arguments>
+            <argument name="checkoutSession" xsi:type="object">Magento\Checkout\Model\Session\Proxy</argument>
+        </arguments>
+    </type>
+
+    <type name="Hyva\Checkout\Model\Magewire\Payment\PlaceOrderServiceProvider">
+        <arguments>
+            <argument name="placeOrderServiceList" xsi:type="array">
+                <item name="paradoxlabs_cybersource" xsi:type="object">ParadoxLabs\CyberSourceHyvaCheckout\Magewire\Payment\PlaceOrderService</item>
+            </argument>
+        </arguments>
+    </type>
+</config>
