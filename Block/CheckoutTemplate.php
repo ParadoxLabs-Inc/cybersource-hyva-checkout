@@ -29,6 +29,7 @@ use ParadoxLabs\CyberSource\Model\Config\CheckoutProvider;
 use ParadoxLabs\CyberSource\Model\Config\Config;
 use ParadoxLabs\CyberSourceHyvaCheckout\ViewModel\PaymentForm;
 use ParadoxLabs\TokenBase\Gateway\Validator\CreditCard\Types;
+use Throwable;
 
 class CheckoutTemplate extends Template
 {
@@ -88,7 +89,7 @@ class CheckoutTemplate extends Template
             if ($quoteIdMask->getMaskedId()) {
                 return (string)$quoteIdMask->getMaskedId();
             }
-        } catch (\Throwable) {
+        } catch (Throwable) {
             // Fall through
         }
 
