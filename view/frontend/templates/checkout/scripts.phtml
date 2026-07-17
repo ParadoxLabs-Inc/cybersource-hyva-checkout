@@ -63,12 +63,6 @@ $inlineScript = <<<JS
         // Consecutive-failure cap on mount attempts, so a persistent failure (e.g. UC.js blocked by
         // CSP) cannot turn every checkout event into a fresh signed capture-context API call forever.
         const MAX_MOUNT_FAILURES = 3;
-        // JWT expiry handling: act this far ahead of exp, floor delays (client clock skew), fall back
-        // to ~14 minutes when a JWT carries no usable exp claim (server-side TTL is ~15 minutes).
-        const EXPIRY_MARGIN_MS = 60 * 1000;
-        const MIN_EXPIRY_DELAY_MS = 30 * 1000;
-        const FALLBACK_TTL_MS = 14 * 60 * 1000;
-
         // -----------------------------------------------------------------------------------------
         // additional_data contract (prepareSubmit()):
         //   New card    => transient_token = <UC transient-token JWT>, card_id = ''.
@@ -239,59 +233,21 @@ $inlineScript = <<<JS
             },
 
             /**
-             * Decode the capture-context JWT for the UC client library URL + SRI hash and inject it
-             * as a plain script tag. Hyva has no AMD loader, so the UMD bundle sets window.Accept.
+             * Load UC.js via the shared client (script tag + SRI; UMD sets window.Accept), then
+             * mount. Generation-guarded on both settle paths.
              */
             loadClientLibrary: function(captureContext, generation) {
-                let ctx;
-
-                try {
-                    ctx = this.decodeJwtBody(captureContext).ctx[0].data;
-                } catch (error) {
-                    this.handleMountError('Invalid capture context');
-
-                    return;
-                }
-
-                const existing = document.querySelector('script[data-uc-lib="' + CSS.escape(ctx.clientLibrary) + '"]');
-
-                if (existing) {
-                    if (typeof window.Accept === 'function') {
-                        this.mountUnifiedCheckout(captureContext, generation);
-                    } else {
-                        existing.addEventListener(
-                            'load',
-                            () => this.mountUnifiedCheckout(captureContext, generation)
-                        );
-                    }
-
-                    return;
-                }
-
-                const script = document.createElement('script');
-                script.type = 'text/javascript';
-                script.src = ctx.clientLibrary;
-                script.setAttribute('data-uc-lib', ctx.clientLibrary);
-
-                if (ctx.clientLibraryIntegrity) {
-                    script.integrity = ctx.clientLibraryIntegrity;
-                    script.crossOrigin = 'anonymous';
-                }
-
-                script.addEventListener('load', () => {
-                    if (this.isCurrentGeneration(generation)) {
-                        this.mountUnifiedCheckout(captureContext, generation);
-                    }
-                });
-                script.addEventListener('error', () => {
-                    script.remove();
-
-                    if (this.isCurrentGeneration(generation)) {
-                        this.handleMountError('Unable to load payment library');
-                    }
-                });
-
-                document.head.appendChild(script);
+                window.pdlCybsUc.loadClientLibrary(captureContext)
+                    .then(() => {
+                        if (this.isCurrentGeneration(generation)) {
+                            this.mountUnifiedCheckout(captureContext, generation);
+                        }
+                    })
+                    .catch(error => {
+                        if (this.isCurrentGeneration(generation)) {
+                            this.handleMountError(error && error.message ? error.message : null);
+                        }
+                    });
             },
 
             mountUnifiedCheckout: function(captureContext, generation) {
@@ -305,19 +261,11 @@ $inlineScript = <<<JS
                     return;
                 }
 
-                window.Accept(captureContext)
-                    .then(acceptInstance => {
-                        // false = embedded layout (sidebar rejects the paymentScreen container)
-                        return acceptInstance.unifiedPayments(false);
-                    })
-                    .then(unifiedPayments => {
-                        return unifiedPayments.show({
-                            containers: {
-                                paymentSelection: '#{$code}_uc_selection',
-                                paymentScreen: '#{$code}_uc_screen',
-                            },
-                        });
-                    })
+                window.pdlCybsUc.mountUnifiedPayments(
+                    captureContext,
+                    '#{$code}_uc_selection',
+                    '#{$code}_uc_screen'
+                )
                     .then(transientTokenJwt => {
                         // A token from a superseded mount belongs to a dead context; never accept it.
                         if (this.isCurrentGeneration(generation)) {
@@ -448,44 +396,12 @@ $inlineScript = <<<JS
                 }
             },
 
-            decodeJwtBody: function(jwt) {
-                let payload = jwt.split('.')[1];
-                payload = payload.replace(/-/g, '+').replace(/_/g, '/');
-                while (payload.length % 4) {
-                    payload += '=';
-                }
-
-                return JSON.parse(window.atob(payload));
-            },
-
-            /**
-             * How long to wait before acting on a JWT's expiry. Floored rather than zero because a
-             * skewed client clock can read a fresh JWT as already expired, and a zero delay there
-             * means an unbounded loop of signed capture-context calls.
-             */
-            getRefreshDelay: function(jwt) {
-                let expiry = null;
-
-                try {
-                    const body = this.decodeJwtBody(jwt);
-                    expiry = typeof body.exp === 'number' ? body.exp * 1000 : null;
-                } catch (error) {
-                    expiry = null;
-                }
-
-                if (expiry === null) {
-                    return FALLBACK_TTL_MS;
-                }
-
-                return Math.max(MIN_EXPIRY_DELAY_MS, expiry - Date.now() - EXPIRY_MARGIN_MS);
-            },
-
             scheduleContextRefresh: function(captureContext) {
                 this.clearTimer('_contextTimer');
 
                 this._contextTimer = setTimeout(
                     this.handleContextExpiry.bind(this),
-                    this.getRefreshDelay(captureContext)
+                    window.pdlCybsUc.getRefreshDelay(captureContext)
                 );
             },
 
@@ -509,7 +425,7 @@ $inlineScript = <<<JS
 
                 this._tokenTimer = setTimeout(
                     this.handleTokenExpiry.bind(this),
-                    this.getRefreshDelay(transientTokenJwt)
+                    window.pdlCybsUc.getRefreshDelay(transientTokenJwt)
                 );
             },
 
@@ -686,11 +602,7 @@ $inlineScript = <<<JS
             },
 
             showError: function(message) {
-                if (typeof window.dispatchMessages === 'function') {
-                    window.dispatchMessages([{type: 'error', text: message}], 5000);
-                } else {
-                    window.alert(message);
-                }
+                window.pdlCybsUc.showError(message);
             },
 
             validateCvv: function(e) {
@@ -720,6 +632,9 @@ $inlineScript = <<<JS
     window.addEventListener('alpine:init', () => Alpine.data('{$code}PaymentForm', {$code}PaymentForm), {once: true});
 JS;
 ?>
+<?= /* @noEscape */ $block->fetchView(
+    $block->getTemplateFile('ParadoxLabs_CyberSourceHyvaCheckout::uc-client.phtml')
+) ?>
 <script><?= /* @noEscape */
     $inlineScript ?></script>
 <?php $hyvaCsp->registerInlineScript() ?>

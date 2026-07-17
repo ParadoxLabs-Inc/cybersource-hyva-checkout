@@ -1,0 +1,355 @@
+<?php declare(strict_types=1);
+
+/**
+ * Copyright © 2023-present ParadoxLabs, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Need help? Try our knowledgebase and support system:
+ *
+ * @link https://support.paradoxlabs.com
+ */
+
+use Magento\Framework\Escaper;
+use Magento\Framework\View\Element\Template;
+use ParadoxLabs\CyberSource\Model\Config\Config;
+
+/**
+ * Unified Checkout payment pane for the Hyva customer payment-options add/edit form.
+ *
+ * Rendered as the 'payment_pane' child of the shared TokenBaseHyvaCheckout form scaffold; mounts
+ * the UC drop-in when the scaffold announces the address step is confirmed, and submits the form
+ * once a transient token is captured (the TokenBase Save controller exchanges it server-side).
+ *
+ * @var Template $block
+ * @var Escaper $escaper
+ * @var Hyva\Theme\ViewModel\HyvaCsp $hyvaCsp
+ */
+
+$code = $escaper->escapeHtmlAttr(Config::CODE);
+$paneConfig = [
+    'code' => Config::CODE,
+    'captureContextUrl' => $block->getUrl('pdl_cybs/unifiedCheckout/captureContext'),
+];
+
+$tServerError = $escaper->escapeJs(__('A server error occurred. Please try again.'));
+$tLoadFailed  = $escaper->escapeJs(__('The payment form could not be loaded. Please reload the page and try again.'));
+?>
+<fieldset class="mb-4"
+          x-data="<?= /* @noEscape */ $code ?>PaymentinfoPane"
+          data-config="<?= $escaper->escapeHtmlAttr(json_encode($paneConfig)) ?>"
+>
+    <legend class="text-lg font-medium mb-2"><?= $escaper->escapeHtml(__('Payment Information')) ?></legend>
+
+    <input type="hidden" name="payment[transient_token]" value=""/>
+
+    <div class="relative">
+        <div x-show="loading" x-cloak class="flex justify-center p-4">
+            <svg class="animate-spin h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                 aria-label="<?= $escaper->escapeHtmlAttr(__('Loading payment form')) ?>">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135
+                         5.824 3 7.938l3-2.647z"></path>
+            </svg>
+        </div>
+        <div id="<?= /* @noEscape */ $code ?>_uc_selection" class="unified-checkout-selection"></div>
+        <div id="<?= /* @noEscape */ $code ?>_uc_screen" class="unified-checkout-screen w-full"></div>
+    </div>
+</fieldset>
+
+<?= /* @noEscape */ $block->fetchView(
+    $block->getTemplateFile('ParadoxLabs_CyberSourceHyvaCheckout::uc-client.phtml')
+) ?>
+
+<script>
+    'use strict';
+
+    (function () {
+        if (window.<?= /* @noEscape */ $code ?>PaymentinfoPaneRegistered) {
+            return;
+        }
+
+        window.<?= /* @noEscape */ $code ?>PaymentinfoPaneRegistered = true;
+
+        // How long after a mount is kicked off to verify the drop-in actually painted; and the
+        // outer bound on a whole mount cycle (request -> UC.js load -> mount). Same rationale as
+        // the checkout component: the library load can stall without ever calling back.
+        const MOUNT_HEALTH_CHECK_MS = 3000;
+        const CYCLE_TIMEOUT_MS = 45000;
+        // Consecutive dead-mount cap, so a persistently broken mount stops rather than looping on
+        // signed capture-context calls. Reset on each deliberate address-confirm re-entry.
+        const MAX_MOUNT_FAILURES = 3;
+
+        window.addEventListener('alpine:init', () => {
+            Alpine.data('<?= /* @noEscape */ $code ?>PaymentinfoPane', () => ({
+                config: {},
+                loading: false,
+                _generation: 0,
+                _inFlight: false,
+                _mountFailures: 0,
+                _abortController: null,
+                _contextTimer: null,
+                _healthTimer: null,
+
+                init() {
+                    this.config = JSON.parse(this.$el.dataset.config);
+
+                    window.addEventListener(
+                        this.config.code + 'PaymentinfoAddressConfirmed',
+                        this.handleAddressConfirmed.bind(this)
+                    );
+                    window.addEventListener(
+                        this.config.code + 'PaymentinfoAddressEdit',
+                        this.handleAddressEdit.bind(this)
+                    );
+                },
+
+                getForm() {
+                    return this.$el.closest('form');
+                },
+
+                handleAddressConfirmed() {
+                    // Deliberate (re-)entry into the payment step; clear the failure budget so a
+                    // past dead mount does not dead-end a customer who is explicitly retrying.
+                    this._mountFailures = 0;
+
+                    this.mountDropin();
+                },
+
+                handleAddressEdit() {
+                    // Editing the address invalidates the capture context (billTo is baked in);
+                    // tear down so the next confirm mints a fresh one.
+                    this.teardownDropin();
+                },
+
+                isDropinMounted() {
+                    const screen = document.getElementById('<?= /* @noEscape */ $code ?>_uc_screen');
+
+                    if (!screen || screen.children.length === 0) {
+                        return false;
+                    }
+
+                    // A visible container at zero height is a dead mount (0x0 iframe); hidden but
+                    // populated is legitimately unmeasurable and counts as mounted.
+                    return screen.offsetParent === null || screen.getBoundingClientRect().height > 0;
+                },
+
+                mountDropin() {
+                    if (this._inFlight || this.isDropinMounted()) {
+                        return;
+                    }
+
+                    this.loading = true;
+                    this._inFlight = true;
+
+                    const generation = ++this._generation;
+
+                    // Bound the whole cycle; re-armed at the paint interval once the mount begins.
+                    this.scheduleMountHealthCheck(CYCLE_TIMEOUT_MS);
+
+                    this._abortController = new AbortController();
+
+                    // Serialize the whole form (billing fields + form_key + method + source), same
+                    // contract as the Luma widget; the capture-context endpoint builds billTo from it.
+                    const body = new URLSearchParams(new FormData(this.getForm()));
+
+                    fetch(this.config.captureContextUrl, {
+                        method: 'POST',
+                        headers: {'X-Requested-With': 'XMLHttpRequest'},
+                        body: body,
+                        signal: this._abortController.signal,
+                    })
+                    .then(response => response.json().then(data => {
+                        if (!response.ok) {
+                            throw new Error(data && data.message ? data.message : 'Server error');
+                        }
+
+                        return data;
+                    }))
+                    .then(data => {
+                        if (generation !== this._generation) {
+                            return;
+                        }
+
+                        if (!data || !data.captureContext) {
+                            throw new Error('Missing capture context');
+                        }
+
+                        return window.pdlCybsUc.loadClientLibrary(data.captureContext)
+                            .then(() => {
+                                if (generation === this._generation) {
+                                    this.mountUnifiedCheckout(data.captureContext, generation);
+                                }
+                            });
+                    })
+                    .catch(error => {
+                        if (error && error.name === 'AbortError') {
+                            return;
+                        }
+
+                        if (generation === this._generation) {
+                            this.handleMountError(error && error.message ? error.message : null);
+                        }
+                    });
+                },
+
+                mountUnifiedCheckout(captureContext, generation) {
+                    window.pdlCybsUc.mountUnifiedPayments(
+                        captureContext,
+                        '#<?= /* @noEscape */ $code ?>_uc_selection',
+                        '#<?= /* @noEscape */ $code ?>_uc_screen'
+                    )
+                    .then(transientTokenJwt => {
+                        // A token from a superseded mount belongs to a dead context.
+                        if (generation === this._generation) {
+                            this.handleTransientToken(transientTokenJwt);
+                        }
+                    })
+                    .catch(error => {
+                        if (generation === this._generation) {
+                            this.handleMountError(error && error.message ? error.message : null);
+                        }
+                    });
+
+                    this.loading = false;
+                    this.scheduleContextRefresh(captureContext);
+                    this.scheduleMountHealthCheck(MOUNT_HEALTH_CHECK_MS);
+                },
+
+                /**
+                 * Stash the token in the hidden input and submit to the TokenBase save controller.
+                 * The dedicated add-card form carries no stored-card select; the card_id field is
+                 * stripped so only the transient_token represents the new card (Luma parity).
+                 */
+                handleTransientToken(transientTokenJwt) {
+                    if (!transientTokenJwt) {
+                        return;
+                    }
+
+                    const form = this.getForm();
+                    form.querySelector('[name="payment[transient_token]"]').value = transientTokenJwt;
+
+                    this.clearTimers();
+
+                    const cardId = form.querySelector('input[name="card_id"]');
+                    if (cardId) {
+                        cardId.name = '';
+                    }
+
+                    form.submit();
+                },
+
+                handleMountError(message) {
+                    this._mountFailures++;
+                    this._inFlight = false;
+                    this.loading = false;
+                    this.clearTimer('_healthTimer');
+
+                    window.pdlCybsUc.showError(message || '<?= /* @noEscape */ $tServerError ?>');
+                },
+
+                scheduleContextRefresh(captureContext) {
+                    this.clearTimer('_contextTimer');
+
+                    // Silent re-mount when the context lapses: nothing entered survives a lapsed
+                    // context, and no token is ever held here (capture submits immediately).
+                    this._contextTimer = setTimeout(
+                        this.remountDropin.bind(this),
+                        window.pdlCybsUc.getRefreshDelay(captureContext)
+                    );
+                },
+
+                scheduleMountHealthCheck(delay) {
+                    this.clearTimer('_healthTimer');
+
+                    this._healthTimer = setTimeout(this.checkMountHealth.bind(this), delay);
+                },
+
+                /**
+                 * Recover from a mount that attached but never became usable (0-height iframe).
+                 * The only place a mount is confirmed healthy, so it owns the failure budget.
+                 */
+                checkMountHealth() {
+                    this._healthTimer = null;
+                    this._inFlight = false;
+
+                    const screen = document.getElementById('<?= /* @noEscape */ $code ?>_uc_screen');
+
+                    if (!screen || screen.offsetParent === null) {
+                        return;
+                    }
+
+                    if (this.isDropinMounted()) {
+                        this._mountFailures = 0;
+
+                        return;
+                    }
+
+                    this._mountFailures++;
+
+                    if (this._mountFailures >= MAX_MOUNT_FAILURES) {
+                        window.pdlCybsUc.showError('<?= /* @noEscape */ $tLoadFailed ?>');
+
+                        return;
+                    }
+
+                    this.remountDropin();
+                },
+
+                remountDropin() {
+                    this.teardownDropin();
+                    this.mountDropin();
+                },
+
+                teardownDropin() {
+                    this.clearTimers();
+
+                    // Invalidate any cycle still in flight so late callbacks cannot land.
+                    this._generation++;
+                    this._inFlight = false;
+                    this.loading = false;
+
+                    if (this._abortController) {
+                        this._abortController.abort();
+                        this._abortController = null;
+                    }
+
+                    const form = this.getForm();
+                    const token = form ? form.querySelector('[name="payment[transient_token]"]') : null;
+                    if (token) {
+                        token.value = '';
+                    }
+
+                    document.getElementById('<?= /* @noEscape */ $code ?>_uc_selection')?.replaceChildren();
+                    document.getElementById('<?= /* @noEscape */ $code ?>_uc_screen')?.replaceChildren();
+                },
+
+                clearTimer(handle) {
+                    if (this[handle]) {
+                        clearTimeout(this[handle]);
+                        this[handle] = null;
+                    }
+                },
+
+                clearTimers() {
+                    this.clearTimer('_contextTimer');
+                    this.clearTimer('_healthTimer');
+                },
+            }));
+        }, {once: true});
+    })();
+</script>
+<?php if (isset($hyvaCsp)): ?>
+    <?php $hyvaCsp->registerInlineScript() ?>
+<?php endif; ?>

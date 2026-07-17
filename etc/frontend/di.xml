@@ -5,6 +5,14 @@
             <argument name="checkoutSession" xsi:type="object">Magento\Checkout\Model\Session\Proxy</argument>
         </arguments>
     </type>
+    <type name="ParadoxLabs\TokenBaseHyvaCheckout\ViewModel\SupportedMethods">
+        <arguments>
+            <argument name="methods" xsi:type="array">
+                <item name="paradoxlabs_cybersource" xsi:type="string">paradoxlabs_cybersource</item>
+            </argument>
+        </arguments>
+    </type>
+
     <type name="Hyva\Checkout\Model\Magewire\Payment\PlaceOrderServiceProvider">
         <arguments>
             <argument name="placeOrderServiceList" xsi:type="array">

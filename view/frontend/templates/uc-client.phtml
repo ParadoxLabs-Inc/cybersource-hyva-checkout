@@ -1,0 +1,180 @@
+<?php declare(strict_types=1);
+
+/**
+ * Copyright © 2023-present ParadoxLabs, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Need help? Try our knowledgebase and support system:
+ *
+ * @link https://support.paradoxlabs.com
+ */
+
+/**
+ * Shared Unified Checkout client transport for Hyva pages (checkout + customer payment options).
+ *
+ * Hyva counterpart of the base module's view/base/web/js/unified-checkout-client.js AMD module:
+ * JWT decoding, UC.js injection with SRI (plain script tag — Hyva has no AMD loader, so the UMD
+ * bundle sets window.Accept), the Accept mount chain, and the error surface. Each page keeps its
+ * own state machine; only this genuinely identical plumbing is shared.
+ *
+ * Included via $block->fetchView() from the consuming templates; the window guard makes double
+ * inclusion harmless.
+ */
+
+/** @var Hyva\Theme\ViewModel\HyvaCsp $hyvaCsp */
+?>
+<script>
+    'use strict';
+
+    (function () {
+        if (window.pdlCybsUc) {
+            return;
+        }
+
+        // JWT expiry handling: act this far ahead of exp, floor delays (client clock skew), fall
+        // back to ~14 minutes when a JWT carries no usable exp claim (server-side TTL ~15 minutes).
+        const EXPIRY_MARGIN_MS = 60 * 1000;
+        const MIN_EXPIRY_DELAY_MS = 30 * 1000;
+        const FALLBACK_TTL_MS = 14 * 60 * 1000;
+
+        window.pdlCybsUc = {
+            /**
+             * Base64url-decode the JWT payload (middle segment) and parse as JSON.
+             */
+            decodeJwtBody(jwt) {
+                let payload = jwt.split('.')[1];
+                payload = payload.replace(/-/g, '+').replace(/_/g, '/');
+                while (payload.length % 4) {
+                    payload += '=';
+                }
+
+                return JSON.parse(window.atob(payload));
+            },
+
+            /**
+             * How long to wait before acting on a JWT's expiry. Floored rather than zero because a
+             * skewed client clock can read a fresh JWT as already expired, and a zero delay means
+             * an unbounded loop of signed capture-context calls.
+             */
+            getRefreshDelay(jwt) {
+                let expiry = null;
+
+                try {
+                    const body = this.decodeJwtBody(jwt);
+                    expiry = typeof body.exp === 'number' ? body.exp * 1000 : null;
+                } catch (error) {
+                    expiry = null;
+                }
+
+                if (expiry === null) {
+                    return FALLBACK_TTL_MS;
+                }
+
+                return Math.max(MIN_EXPIRY_DELAY_MS, expiry - Date.now() - EXPIRY_MARGIN_MS);
+            },
+
+            /**
+             * Decode the capture-context JWT for the UC client library URL + SRI hash and inject it
+             * as a plain script tag. Resolves once window.Accept is available; rejects with an
+             * Error message suitable for display.
+             */
+            loadClientLibrary(captureContext) {
+                return new Promise((resolve, reject) => {
+                    let ctx;
+
+                    try {
+                        ctx = this.decodeJwtBody(captureContext).ctx[0].data;
+                    } catch (error) {
+                        reject(new Error('Invalid capture context'));
+
+                        return;
+                    }
+
+                    const existing = document.querySelector(
+                        'script[data-uc-lib="' + CSS.escape(ctx.clientLibrary) + '"]'
+                    );
+
+                    if (existing) {
+                        if (typeof window.Accept === 'function') {
+                            resolve();
+                        } else {
+                            existing.addEventListener('load', () => resolve());
+                            existing.addEventListener('error', () => reject(
+                                new Error('Unable to load payment library')
+                            ));
+                        }
+
+                        return;
+                    }
+
+                    const script = document.createElement('script');
+                    script.type = 'text/javascript';
+                    script.src = ctx.clientLibrary;
+                    script.setAttribute('data-uc-lib', ctx.clientLibrary);
+
+                    if (ctx.clientLibraryIntegrity) {
+                        script.integrity = ctx.clientLibraryIntegrity;
+                        script.crossOrigin = 'anonymous';
+                    }
+
+                    script.addEventListener('load', () => {
+                        if (typeof window.Accept === 'function') {
+                            resolve();
+                        } else {
+                            reject(new Error('Payment library unavailable'));
+                        }
+                    });
+                    script.addEventListener('error', () => {
+                        // Remove the dead tag so a retry re-fetches instead of reusing it.
+                        script.remove();
+                        reject(new Error('Unable to load payment library'));
+                    });
+
+                    document.head.appendChild(script);
+                });
+            },
+
+            /**
+             * Mount the UC drop-in via the Accept global into the embedded containers; resolves to
+             * the captured transient-token JWT.
+             */
+            mountUnifiedPayments(captureContext, selectionSelector, screenSelector) {
+                return window.Accept(captureContext)
+                    .then(acceptInstance => {
+                        // false = embedded layout (sidebar rejects the paymentScreen container)
+                        return acceptInstance.unifiedPayments(false);
+                    })
+                    .then(unifiedPayments => {
+                        return unifiedPayments.show({
+                            containers: {
+                                paymentSelection: selectionSelector,
+                                paymentScreen: screenSelector,
+                            },
+                        });
+                    });
+            },
+
+            showError(message) {
+                if (typeof window.dispatchMessages === 'function') {
+                    window.dispatchMessages([{type: 'error', text: message}], 5000);
+                } else {
+                    window.alert(message);
+                }
+            },
+        };
+    })();
+</script>
+<?php if (isset($hyvaCsp)): ?>
+    <?php $hyvaCsp->registerInlineScript() ?>
+<?php endif; ?>
