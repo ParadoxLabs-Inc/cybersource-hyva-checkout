@@ -114,7 +114,7 @@ $inlineScript = <<<JS
                 this.save = !!this.config.defaultSaveCard;
 
                 window.addEventListener('checkout:validate:{$code}', this.prepareSubmit.bind(this));
-                window.addEventListener('{$code}BillingUpdated', this.maybeMountDropin.bind(this));
+                window.addEventListener('{$code}BillingUpdated', this.handleBillingUpdated.bind(this));
                 // Hyva dispatches this on window (init-payment.phtml); a document listener never fires.
                 window.addEventListener('checkout:payment:method-activate', this.handleMethodActivate.bind(this));
 
@@ -373,6 +373,34 @@ $inlineScript = <<<JS
             },
 
             /**
+             * A billing address change invalidates a capture context minted against the old billTo —
+             * AVS data is baked into the resulting transient token, so a stale context yields avoidable
+             * AVS declines. If the drop-in is mounted but nothing has been tokenized yet, re-mint against
+             * the new billTo by remounting. Once a token exists we leave it: a billing edit must not
+             * destroy completed card entry (matches the Luma renderer's behavior). The guards below
+             * ensure repeated billing events cannot storm requests — we never act while a mount cycle is
+             * in flight (its own context will carry the latest billTo), and the not-yet-mounted case
+             * falls through to maybeMountDropin(), which is itself guarded.
+             */
+            handleBillingUpdated: function() {
+                if (this._activeGeneration !== null) {
+                    return;
+                }
+
+                if (this.transientToken) {
+                    return;
+                }
+
+                if (this.isDropinMounted()) {
+                    this.remountDropin();
+
+                    return;
+                }
+
+                this.maybeMountDropin();
+            },
+
+            /**
              * Hide the place-order button while the drop-in is collecting card data — the drop-in
              * has its own continue button which resolves the transient token; place-order returns
              * once a stored card is selected or the new card is tokenized.
@@ -473,11 +501,21 @@ $inlineScript = <<<JS
                 // branch below can return.
                 this._activeGeneration = null;
 
+                // A captured token means card entry already succeeded and the token's own timer owns
+                // expiry — mount health is moot and the generation must be left intact.
+                if (this.transientToken) {
+                    return;
+                }
+
                 const screen = document.getElementById('{$code}_uc_screen');
 
-                if (this.transientToken
-                    || screen === null
-                    || screen.offsetParent === null) {
+                if (screen === null || screen.offsetParent === null) {
+                    // The container vanished or is hidden. A UC.js load still stalled in flight could
+                    // resolve later and mount a stale context into this hidden container, arming timers
+                    // with no visible UI. Bump the generation so any such late callback is discarded —
+                    // releasing _activeGeneration alone (done above) would let a stale mount land.
+                    this._generation++;
+
                     return;
                 }
 
