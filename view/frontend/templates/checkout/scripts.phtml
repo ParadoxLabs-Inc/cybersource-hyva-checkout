@@ -94,6 +94,7 @@ $inlineScript = <<<JS
             _mountFailures: 0,
             _lastSelectedCard: '',
             _abortController: null,
+            _hidOrderButton: false,
 
             // Expiry timers, deliberately split: a lapsed capture context only matters while the
             // customer has yet to tokenize (silent re-mount), whereas a lapsed transient token
@@ -114,7 +115,8 @@ $inlineScript = <<<JS
 
                 window.addEventListener('checkout:validate:{$code}', this.prepareSubmit.bind(this));
                 window.addEventListener('{$code}BillingUpdated', this.maybeMountDropin.bind(this));
-                document.addEventListener('checkout:payment:method-activate', this.handleMethodActivate.bind(this));
+                // Hyva dispatches this on window (init-payment.phtml); a document listener never fires.
+                window.addEventListener('checkout:payment:method-activate', this.handleMethodActivate.bind(this));
 
                 this.\$watch('selectedCard', this.handleSelectedCardChange.bind(this));
 
@@ -382,8 +384,18 @@ $inlineScript = <<<JS
 
                 const orderBtn = document.querySelector('.btn-primary[x-bind~="buttonPlaceOrder"]');
 
-                if (orderBtn) {
-                    orderBtn.style.display = (method === '{$code}' && this.selectedCard === '') ? 'none' : 'block';
+                if (!orderBtn) {
+                    return;
+                }
+
+                // Only ever undo our own hide: every payment component shares this one button, so
+                // unconditional writes from each would clobber one another on method switches.
+                if (method === '{$code}' && this.selectedCard === '') {
+                    orderBtn.style.display = 'none';
+                    this._hidOrderButton = true;
+                } else if (this._hidOrderButton) {
+                    orderBtn.style.display = '';
+                    this._hidOrderButton = false;
                 }
             },
 
