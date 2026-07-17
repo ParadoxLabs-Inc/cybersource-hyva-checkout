@@ -37,11 +37,40 @@ class RegisterHyvaCompatibilityObserver implements ObserverInterface
         $config     = $event->getData('config');
         $extensions = $config->hasData('extensions') ? $config->getData('extensions') : [];
 
+        if (!is_array($extensions)) {
+            $extensions = [];
+        }
+
         $moduleName = implode('_', array_slice(explode('\\', __CLASS__), 0, 2));
 
-        $path = $this->componentRegistrar->getPath(ComponentRegistrar::MODULE, $moduleName);
+        $path = (string) $this->componentRegistrar->getPath(ComponentRegistrar::MODULE, $moduleName);
 
-        $extensions[] = ['src' => substr((string) $path, strlen(BP) + 1)];
+        // ComponentRegistrar resolves registration.php's __DIR__ to a real path. On a normal install
+        // that path is under the Magento base dir, so we emit it relative to BP — the form the Hyvä
+        // tailwind tooling (@hyva-themes/hyva-modules) expects, since it does path.join(basePath, src).
+        //
+        // In dev these modules are frequently symlinked into app/code from outside BP (e.g. /mnt/c/...),
+        // so the real path is NOT under BP and a naive substr() yields a truncated, garbage src. Because
+        // path.join() does not honor absolute paths, emitting the absolute real path would not help
+        // either; instead we emit the app/code symlink location (which resolves back to the module) when
+        // that symlink is present and points at the same target.
+        if (str_starts_with($path, BP . DIRECTORY_SEPARATOR)) {
+            $src = substr($path, strlen(BP) + 1);
+        } else {
+            $appCodePath = 'app' . DIRECTORY_SEPARATOR . 'code' . DIRECTORY_SEPARATOR
+                . str_replace('_', DIRECTORY_SEPARATOR, $moduleName);
+            $symlink     = BP . DIRECTORY_SEPARATOR . $appCodePath;
+
+            // phpcs:ignore Magento2.Functions.DiscouragedFunction
+            if (is_link($symlink) && realpath($symlink) === realpath($path)) {
+                $src = $appCodePath;
+            } else {
+                // Last resort: keep the historical behavior.
+                $src = substr($path, strlen(BP) + 1);
+            }
+        }
+
+        $extensions[] = ['src' => $src];
 
         $config->setData('extensions', $extensions);
     }
