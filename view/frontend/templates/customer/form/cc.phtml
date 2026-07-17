@@ -229,8 +229,9 @@ $tLoadFailed  = $escaper->escapeJs(__('The payment form could not be loaded. Ple
 
                 /**
                  * Stash the token in the hidden input and submit to the TokenBase save controller.
-                 * The dedicated add-card form carries no stored-card select; the card_id field is
-                 * stripped so only the transient_token represents the new card (Luma parity).
+                 * The scaffold's hidden 'id' field carries the card hash on edit (so Save updates
+                 * the existing card instead of duplicating — deliberate improvement over Luma,
+                 * which strips the id and re-adds) and is empty on add.
                  */
                 handleTransientToken(transientTokenJwt) {
                     if (!transientTokenJwt) {
@@ -241,11 +242,6 @@ $tLoadFailed  = $escaper->escapeJs(__('The payment form could not be loaded. Ple
                     form.querySelector('[name="payment[transient_token]"]').value = transientTokenJwt;
 
                     this.clearTimers();
-
-                    const cardId = form.querySelector('input[name="card_id"]');
-                    if (cardId) {
-                        cardId.name = '';
-                    }
 
                     form.submit();
                 },
