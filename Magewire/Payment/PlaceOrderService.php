@@ -48,6 +48,13 @@ class PlaceOrderService extends AbstractPlaceOrderService
      * that is what copies transient_token into additional_information for the UC auth seam
      * and resolves card_id into tokenbase_id.
      *
+     * The addData() that follows is load-bearing, not redundant: when Hyva passes the quote
+     * payment into CartManagement::placeOrder(), QuoteManagement re-runs
+     * importData($payment->getData()) (QuoteManagement::placeOrderRun). Our assign observer
+     * CLEARS additional_information.transient_token whenever the incoming data carries no
+     * top-level transient_token — which is exactly the post-assign state — so without the
+     * re-staged keys that second import would wipe the token it just stored.
+     *
      * @throws CouldNotSaveException
      * @throws \Magento\Framework\Exception\LocalizedException
      */
@@ -61,10 +68,15 @@ class PlaceOrderService extends AbstractPlaceOrderService
             self::ALLOWED_KEYS,
         );
 
-        $quote->getPayment()->importData([
+        $payment = $quote->getPayment();
+        $payment->importData([
             PaymentInterface::KEY_METHOD => Config::CODE,
             PaymentInterface::KEY_ADDITIONAL_DATA => $knownPaymentData,
         ]);
+
+        // Re-stage the allowed keys as raw payment data so the re-import re-asserts them
+        // through the observer chain instead of clearing them (see docblock).
+        $payment->addData($knownPaymentData);
 
         return parent::placeOrder($quote);
     }
