@@ -23,26 +23,37 @@ namespace ParadoxLabs\CyberSourceHyvaCheckout\Magewire\Payment;
 
 use Hyva\Checkout\Model\Magewire\Payment\AbstractPlaceOrderService;
 use Magento\Framework\Exception\CouldNotSaveException;
+use Magento\Quote\Api\Data\PaymentInterface;
 use Magento\Quote\Model\Quote;
+use ParadoxLabs\CyberSource\Model\Config\Config;
 
 class PlaceOrderService extends AbstractPlaceOrderService
 {
+    /**
+     * Unified Checkout additional_data contract: exactly one of {transient_token, card_id}
+     * populated per submit, plus the stored-card CCV and the save-card flag.
+     */
     private const ALLOWED_KEYS
         = [
-            'method' => null,
             'card_id' => null,
-            'save' => null,
+            'transient_token' => null,
             'cc_cid' => null,
-            'payerauth_session_id' => null,
-            'response_jwt' => null,
+            'save' => null,
         ];
 
     /**
+     * Assign the client payment data to the quote payment, then place the order.
+     *
+     * importData() (not addData()) so the payment_method_assign_data observer chain runs —
+     * that is what copies transient_token into additional_information for the UC auth seam
+     * and resolves card_id into tokenbase_id.
+     *
      * @throws CouldNotSaveException
+     * @throws \Magento\Framework\Exception\LocalizedException
      */
     public function placeOrder(Quote $quote): int
     {
-        $paymentData = $this->getData()->getPayment();
+        $paymentData = (array)$this->getData()->getPayment();
 
         // Only pass through known allowed values, to prevent parameter injection
         $knownPaymentData = array_intersect_key(
@@ -50,9 +61,10 @@ class PlaceOrderService extends AbstractPlaceOrderService
             self::ALLOWED_KEYS,
         );
 
-        /** @var \Magento\Quote\Model\Quote\Payment $payment */
-        $payment = $quote->getPayment();
-        $payment->addData($knownPaymentData);
+        $quote->getPayment()->importData([
+            PaymentInterface::KEY_METHOD => Config::CODE,
+            PaymentInterface::KEY_ADDITIONAL_DATA => $knownPaymentData,
+        ]);
 
         return parent::placeOrder($quote);
     }

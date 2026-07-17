@@ -15,8 +15,8 @@
         "paradoxlabs/cybersource": "^3.0.0"
     },
     "type": "magento2-module",
-    "version": "1.0.0",
-    "time": "2026-04-29",
+    "version": "2.0.0",
+    "time": "2026-07-17",
     "license": "Apache-2.0",
     "autoload": {
         "files": [

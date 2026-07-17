@@ -22,13 +22,18 @@
 
 use Magento\Framework\Escaper;
 use Magento\Framework\View\Element\Template;
-use Magento\Framework\View\Helper\SecureHtmlRenderer;
 
 /** @var Template $block */
 /** @var Escaper $escaper */
 /** @var Hyva\Theme\ViewModel\HyvaCsp $hyvaCsp */
 
-$code         = $escaper->escapeJs($block->getMethodCode());
+$code            = $escaper->escapeJs($block->getMethodCode());
+$tServerError    = $escaper->escapeJs(__('A server error occurred. Please try again.'));
+$tSessionExpired = $escaper->escapeJs(__('Your payment session expired. Please re-enter your card details.'));
+$tLoadFailed     = $escaper->escapeJs(__('The payment form could not be loaded. Please reload the page and try again.'));
+$tInvalidCvv     = $escaper->escapeJs(__('Please enter a valid CVV.'));
+$tTotalChanged   = $escaper->escapeJs(__('Your order total changed. Please re-enter your card details.'));
+$tCompleteForm   = $escaper->escapeJs(__('Please complete the payment form.'));
 $inlineScript = <<<JS
     'use strict';
 
@@ -46,420 +51,669 @@ $inlineScript = <<<JS
     });
 
     function {$code}PaymentForm() {
+        // How long after a mount is kicked off to verify the drop-in actually painted. The UC iframe
+        // loads asynchronously and exposes no documented ready event, so this is a wall-clock check.
+        const MOUNT_HEALTH_CHECK_MS = 3000;
+        // Outer bound on a whole mount cycle (request -> UC.js load -> mount). The library load can
+        // stall without ever calling back, which would leave the in-flight guard set and every future
+        // mount attempt blocked; arming the health check when the cycle opens catches that stall.
+        const CYCLE_TIMEOUT_MS = 45000;
+        // Placeholder card id used to flag a freshly tokenized (not-yet-vaulted) card in the select.
+        const NEW_CARD_ID = 'unified_checkout_new';
+        // Consecutive-failure cap on mount attempts, so a persistent failure (e.g. UC.js blocked by
+        // CSP) cannot turn every checkout event into a fresh signed capture-context API call forever.
+        const MAX_MOUNT_FAILURES = 3;
+        // JWT expiry handling: act this far ahead of exp, floor delays (client clock skew), fall back
+        // to ~14 minutes when a JWT carries no usable exp claim (server-side TTL is ~15 minutes).
+        const EXPIRY_MARGIN_MS = 60 * 1000;
+        const MIN_EXPIRY_DELAY_MS = 30 * 1000;
+        const FALLBACK_TTL_MS = 14 * 60 * 1000;
+
+        // -----------------------------------------------------------------------------------------
+        // additional_data contract (prepareSubmit()):
+        //   New card    => transient_token = <UC transient-token JWT>, card_id = ''.
+        //   Stored card => transient_token = '', card_id = <vault hash>.
+        // The synthetic NEW_CARD_ID select value never reaches the server as a card_id.
+        // -----------------------------------------------------------------------------------------
         return {
             storedCards: this.\$wire.entangle('storedCards'),
             selectedCard: '',
-            communicatorActive: false,
-            iframeInitialized: false,
-            showHostedForm: true,
-            showTermsNotice: false,
+            newCardEntered: false,
+            transientToken: null,
+            save: true,
+            ccCid: '',
+            loading: false,
+            mountTotal: null,
             componentInitialized: false,
-            processingSave: false,
-            payerAuthSessionId: null,
-            responseJWT: null,
-            payerAuthInitialized: false,
-            timeoutReloader: null,
-            timeoutCommunicator: null,
             config: {},
-            payment: {
-                method: '{$code}',
-                card_id: '',
-                save: true,
-                cc_cid: null,
-                payerauth_session_id: null,
-                response_jwt: null,
-            },
             state: {
                 cc_cid_length: 3,
                 cc_type: '',
             },
+
+            // Mount cycle bookkeeping. A cycle spans request -> library load -> mount -> paint, all
+            // async. _activeGeneration marks a cycle in flight for its whole life; bumping
+            // _generation invalidates superseded cycles so their late callbacks are discarded —
+            // otherwise a stale response could bind the drop-in to a different total than the order.
+            _generation: 0,
+            _activeGeneration: null,
+            _mountFailures: 0,
+            _lastSelectedCard: '',
+            _abortController: null,
+
+            // Expiry timers, deliberately split: a lapsed capture context only matters while the
+            // customer has yet to tokenize (silent re-mount), whereas a lapsed transient token
+            // discards completed card entry and must be announced.
+            _contextTimer: null,
+            _tokenTimer: null,
+            _healthTimer: null,
+
             initForm: function() {
                 if (this.componentInitialized) {
                     return;
                 }
 
                 this.config = JSON.parse(this.\$el.dataset.config);
-                this.selectedCard = this.config.selectedCard;
-                this.payment.card_id = this.config.selectedCard;
-                this.payment.save = this.config.defaultSaveCard;
+                this.selectedCard = this.config.selectedCard || '';
+                this._lastSelectedCard = this.selectedCard;
+                this.save = !!this.config.defaultSaveCard;
 
-                window.addEventListener(
-                    'checkout:validate:{$code}',
-                    this.prepareSubmit.bind(this)
-                );
+                window.addEventListener('checkout:validate:{$code}', this.prepareSubmit.bind(this));
+                window.addEventListener('{$code}BillingUpdated', this.maybeMountDropin.bind(this));
+                document.addEventListener('checkout:payment:method-activate', this.handleMethodActivate.bind(this));
 
-                window.addEventListener('message', this.handleCommunication.bind(this));
-                document.addEventListener('checkout:payment:method-activate', this.toggleOrderButton.bind(this));
-                this._boundLoadHostedForm = this._boundLoadHostedForm || this.loadHostedForm.bind(this);
-                document.removeEventListener('{$code}InitHostedForm', this._boundLoadHostedForm);
-                document.addEventListener('{$code}InitHostedForm', this._boundLoadHostedForm);
-                this.\$watch('selectedCard', this.changeSelectedCard.bind(this));
-
-                if (document.querySelectorAll('[wire\\\\:id=checkout\\\\.terms-conditions]').length) {
-                    this.evaluateTerms();
-
-                    Magewire.hook('message.processed', (message, component) => {
-                        if (component.id === 'checkout.terms-conditions') {
-                            this.evaluateTerms();
-                        }
-                    });
-                }
+                this.\$watch('selectedCard', this.handleSelectedCardChange.bind(this));
 
                 this.loadFingerprint();
-                this.loadPayerAuth();
-                this.changeSelectedCard();
+                this.updateStoredCardState();
+                this.toggleOrderButton();
+                this.maybeMountDropin();
 
                 this.componentInitialized = true;
             },
-            changeSelectedCard: function() {
-                this.showHostedForm = !this.selectedCard;
-                this.payment.card_id = this.selectedCard;
 
-                if (!!this.selectedCard) {
-                    this.state.cc_type = this.storedCards[this.selectedCard]?.type || '';
-                    this.state.cc_cid_length = this.state.cc_type === 'AE' ? 4 : 3;
-                    this.doBinLookup();
+            // --- Mount lifecycle -----------------------------------------------------------------
+
+            isMethodActive: function() {
+                const checked = document.querySelector('input[name="payment-method-option"]:checked');
+
+                return !!checked && checked.value === '{$code}';
+            },
+
+            /**
+             * Whether the drop-in is mounted AND usable. The UC iframe can attach at 0x0, leaving no
+             * visible payment UI while a children-only check reports "mounted" forever — so a visible
+             * container at zero height counts as unmounted. A hidden-but-healthy mount legitimately
+             * measures zero, hence the visibility qualifier.
+             */
+            isDropinMounted: function() {
+                const screen = document.getElementById('{$code}_uc_screen');
+
+                if (!screen || screen.children.length === 0) {
+                    return false;
                 }
 
-                if (this.iframeInitialized === false
-                    && this.showHostedForm === true
-                    && this.showTermsNotice === false) {
-                    this.resetHostedForm();
-                }
-
-                this.toggleOrderButton();
+                return screen.offsetParent === null || screen.getBoundingClientRect().height > 0;
             },
-            resetHostedForm: function() {
-                clearTimeout(this.timeoutReloader);
-                clearTimeout(this.timeoutCommunicator);
 
-                this.\$wire.call('initHostedForm');
-            },
-            toggleOrderButton: function(event) {
-                let method = event && event.detail
-                             ? event.detail.method
-                             : document.querySelector('input[name="payment-method-option"]:checked')?.value;
+            maybeMountDropin: function() {
+                const screen = document.getElementById('{$code}_uc_screen');
 
-                var orderBtn = document.querySelector('.btn-primary[x-bind~="buttonPlaceOrder"]');
-
-                if (orderBtn) {
-                    orderBtn.style.display = (method === '{$code}' && this.showHostedForm) ? 'none' : 'block';
-                }
-            },
-            loadHostedForm: function(event) {
-                if (this.\$el.isConnected === false) {
+                if (!this.isMethodActive()
+                    || this.selectedCard !== ''
+                    || screen === null
+                    || this._activeGeneration !== null
+                    || this._mountFailures >= MAX_MOUNT_FAILURES
+                    || this.isDropinMounted()) {
                     return;
                 }
 
-                let data = event.detail;
-
-                var iframe = this.\$el.querySelector('iframe');
-
-                var form = document.createElement('form');
-                form.target = iframe.name;
-                form.method = 'post';
-                form.action = data.iframeAction;
-
-                for (let fieldKey in data.iframeParams) {
-                    var input = document.createElement('input');
-                    input.type = 'hidden';
-                    input.name = fieldKey;
-                    input.value = data.iframeParams[fieldKey];
-                    form.appendChild(input);
-                }
-
-                this.\$el.appendChild(form);
-                form.submit();
-
-                // Reload the hosted form when it expires
-                this.timeoutReloader = setTimeout(this.reloadExpiredHostedForm.bind(this), 15*60*1000);
-
-                // Verify communicator connected
-                this.communicatorActive = false;
-                this.timeoutCommunicator = setTimeout(this.checkCommunicator.bind(this), 20*1000);
-
-                // There's an awkward break between 400-750px; set max width to avoid scrolling.
-                if (iframe.scrollWidth > 400 && iframe.scrollWidth < 750) {
-                    iframe.style.maxWidth = '400px';
-                    iframe.style.margin   = '0 auto';
-                }
-
-                this.iframeInitialized = true;
-            },
-            reloadExpiredHostedForm: function() {
-                if (this.iframeInitialized === true) {
-                    this.resetHostedForm();
-                }
-            },
-            checkCommunicator: function() {
-                if (this.communicatorActive
-                    || !this.showHostedForm
-                    || this.showTermsNotice
-                    || this.iframeInitialized === false) {
-                    return;
-                }
-
-                console.error('No message received from communicator.');
-                this.\$wire.call('notifyCommunicatorFailure');
-            },
-            handleCommunication: function(event) {
-                if (event.origin !== location.origin
-                    || !event.data
-                    || event.data.success === undefined) {
-                    return;
-                }
-
-                this.communicatorActive = true;
-                var message = event.data;
-
-                if (message.canceled) {
-                    this.resetHostedForm();
-                } else if (message.success && message.card) {
-                    this.handleSave(message.card);
-                } else if (message.error && message.error.length > 0) {
-                    if (message.error.indexOf('(101)') === -1 && message.error.indexOf('(102)') === -1) {
-                        this.resetHostedForm();
-                    }
-
-                    this.\$wire.call('dispatchErrorMessage', message.error);
-                }
-            },
-            handleSave: function(cardData) {
-                if (this.processingSave) {
-                    return;
-                }
-
-                this.processingSave = true;
-
-                this.\$wire.call('getNewCard', cardData)
-                    .then(this.afterAddCard.bind(this));
-            },
-            afterAddCard: function() {
-                this.iframeInitialized = false;
-                this.processingSave = false;
-
-                this.selectedCard = Object.keys(this.storedCards).at(-1);
-                this.changeSelectedCard();
-
-                let cvvField = this.\$el.querySelector('#{$code}-cc-cid');
-                if (cvvField !== null) {
-                    cvvField.focus();
-                }
-            },
-            prepareSubmit: function(event) {
-                this.payment.payerauth_session_id = this.payerAuthSessionId;
-                this.payment.response_jwt = this.responseJWT;
-
-                let payload = Object.assign({}, this.payment);
-
-                hyvaCheckout.storage.setValue(
-                    'payment',
-                    payload
-                );
-
-                if (event && event.detail && event.detail.resolve) {
-                    event.detail.resolve(true);
-                }
-            },
-            evaluateTerms: function() {
-                try {
-                    const terms = Magewire.find('checkout.terms-conditions').get('termAcceptance');
-                    for (let i in terms) {
-                        if (terms[i] === false) {
-                            this.showTermsNotice = true;
-                            return;
-                        }
-                    }
-                } catch (e) {
-                    // No-op -- catch errors in case the component doesn't exist yet
-                }
-
-                this.showTermsNotice = false;
-
-                this.changeSelectedCard();
+                this.requestCaptureContext();
             },
 
-            // --- Cardinal Cruise / 3DS ---
-            loadFingerprint: function() {
-                if (this.config.fingerprintUrl
-                    && this.config.fingerprintUrl.length > 1) {
-                    var script = document.createElement('script');
-                    script.type = 'text/javascript';
-                    script.src = this.config.fingerprintUrl;
-                    document.head.appendChild(script);
-                }
-            },
-            loadPayerAuth: function() {
-                if (this.config.cardinalScript
-                    && this.config.cardinalScript.length > 0
-                    && this.config.cardinalJWT
-                    && this.config.cardinalJWT.length > 0) {
-                    var script = document.createElement('script');
-                    script.type = 'text/javascript';
-                    script.src = this.config.cardinalScript;
-                    if (this.config.cardinalSRIHash && this.config.cardinalSRIHash.length > 0) {
-                        script.integrity = this.config.cardinalSRIHash;
-                        script.crossOrigin = 'anonymous';
-                    }
-                    script.addEventListener('load', this.initPayerAuth.bind(this));
-                    document.head.appendChild(script);
-                }
-            },
-            initPayerAuth: function() {
-                Cardinal.configure({
-                    payment: {
-                        displayLoading: true
+            requestCaptureContext: function() {
+                this.loading = true;
+
+                const generation = ++this._generation;
+                this._activeGeneration = generation;
+
+                // Bound the whole cycle; mountUnifiedCheckout() re-arms at the shorter paint interval.
+                this.scheduleMountHealthCheck(CYCLE_TIMEOUT_MS);
+
+                // Record the total the capture mandate is minted against, for drift detection at
+                // submit. Fire-and-forget alongside the context request; guarded by generation.
+                this.\$wire.call('getQuoteTotal').then(total => {
+                    if (this.isCurrentGeneration(generation)) {
+                        this.mountTotal = total;
                     }
                 });
 
-                Cardinal.on('payments.validated', this.handlePayerAuthCompletion.bind(this));
-                Cardinal.on('payments.setupComplete', this.handlePayerAuthInit.bind(this));
-                Cardinal.setup('init', {jwt: this.config.cardinalJWT});
+                this._abortController = new AbortController();
 
-                this.payerAuthInitialized = true;
-                this.doBinLookup();
-            },
-            handlePayerAuthInit: function(responseData) {
-                if (responseData && responseData.sessionId !== undefined) {
-                    this.payerAuthSessionId = responseData.sessionId;
-                }
-            },
-            doBinLookup: function() {
-                if (!this.payerAuthInitialized
-                    || typeof Cardinal !== 'object'
-                    || !this.selectedCard) {
-                    return;
-                }
-
-                var card = this.storedCards[this.selectedCard];
-                if (card && card.cc_bin) {
-                    Cardinal.trigger('bin.process', card.cc_bin);
-                }
-            },
-            handlePayerAuthCompletion: function(responseData, responseJWT) {
-                if (responseData.ErrorNumber > 0) {
-                    this.responseJWT = null;
-                    this.\$wire.call(
-                        'dispatchErrorMessage',
-                        responseData.ErrorDescription + ' (' + responseData.ErrorNumber + ')'
-                    );
-                } else {
-                    this.responseJWT = responseJWT;
-                    this.placeOrder();
-                }
-            },
-            startPayerAuthentication: function() {
-                var formData = new FormData();
-                formData.append('form_key', document.querySelector('input[name="form_key"]').value);
-                formData.append('card_id', this.payment.card_id);
-                formData.append('payerauth_session_id', this.payerAuthSessionId || '');
-                formData.append('source', 'checkout');
-
-                fetch(this.config.cardinalAuthUrl, {
-                    method: 'POST',
-                    body: formData,
-                    headers: {
-                        'X-Requested-With': 'XMLHttpRequest',
-                    },
-                })
-                .then(response => response.json())
-                .then(this.runPayerAuth.bind(this))
-                .catch(error => {
-                    this.\$wire.call('dispatchErrorMessage', error.message || 'Payer authentication failed.');
-                });
-            },
-            runPayerAuth: function(response) {
-                Cardinal.continue(
-                    'cca',
-                    response.authPayload,
-                    response.orderPayload,
-                    response.JWT
-                );
-            },
-            placeOrder: function() {
-                this.payment.payerauth_session_id = this.payerAuthSessionId;
-                this.payment.response_jwt = this.responseJWT;
-
-                // Use direct fetch() to intercept Payer Auth enrollment failures
-                // before Hyva shows a generic error. hyvaCheckout.order.place()
-                // does not expose failure details needed for the Cardinal 3DS flow.
-                let url = this.config.isGuest
-                    ? '/rest/V1/guest-carts/' + this.config.cartId + '/payment-information'
-                    : '/rest/V1/carts/mine/payment-information';
-
-                let payload = {
-                    paymentMethod: {
-                        method: this.payment.method,
-                        additional_data: {
-                            card_id: this.payment.card_id,
-                            cc_cid: this.payment.cc_cid,
-                            save: this.payment.save ? '1' : '0',
-                            payerauth_session_id: this.payment.payerauth_session_id || '',
-                            response_jwt: this.payment.response_jwt || '',
-                        }
-                    }
-                };
-
-                if (this.config.isGuest) {
-                    payload.email = document.querySelector('input[name="email"]')?.value || '';
-                }
-
-                fetch(url, {
+                fetch(this.config.captureContextUrl, {
                     method: 'POST',
                     headers: {
-                        'Content-Type': 'application/json',
+                        'Content-Type': 'application/x-www-form-urlencoded',
                         'X-Requested-With': 'XMLHttpRequest',
                     },
-                    body: JSON.stringify(payload),
+                    body: new URLSearchParams({
+                        form_key: hyva.getFormKey(),
+                        source: 'checkout',
+                    }),
+                    signal: this._abortController.signal,
                 })
-                .then(response => {
+                .then(response => response.json().then(data => {
                     if (!response.ok) {
-                        return response.json().then(err => { throw err; });
+                        throw new Error(data && data.message ? data.message : 'Server error');
                     }
-                    return response.json();
-                })
-                .then(orderId => {
-                    window.location.href = this.config.successUrl || '/checkout/onepage/success/';
-                })
-                .catch(error => {
-                    let errorMessage = error.message || 'An error occurred placing your order.';
 
-                    // Check for Payer Auth enrollment requirement
-                    let payerAuthMessage = 'The entered card is enrolled in Payer Authentication.';
-                    if (this.payerAuthInitialized
-                        && typeof Cardinal === 'object'
-                        && errorMessage.indexOf(payerAuthMessage) >= 0) {
-                        this.responseJWT = null;
-                        this.startPayerAuthentication();
+                    return data;
+                }))
+                .then(data => {
+                    if (!this.isCurrentGeneration(generation)) {
                         return;
                     }
 
-                    this.responseJWT = null;
-                    this.\$wire.call('dispatchErrorMessage', errorMessage);
+                    if (!data || !data.captureContext) {
+                        this.handleMountError('Missing capture context');
+
+                        return;
+                    }
+
+                    this.loadClientLibrary(data.captureContext, generation);
+                })
+                .catch(error => {
+                    // fetch abort is an intentional teardown, not a failure.
+                    if (error && error.name === 'AbortError') {
+                        return;
+                    }
+
+                    if (this.isCurrentGeneration(generation)) {
+                        this.handleMountError(error && error.message ? error.message : null);
+                    }
                 });
             },
 
-            // --- Getters for template bindings ---
-            validateCvv(e) {
+            isCurrentGeneration: function(generation) {
+                return generation === this._generation;
+            },
+
+            /**
+             * Decode the capture-context JWT for the UC client library URL + SRI hash and inject it
+             * as a plain script tag. Hyva has no AMD loader, so the UMD bundle sets window.Accept.
+             */
+            loadClientLibrary: function(captureContext, generation) {
+                let ctx;
+
+                try {
+                    ctx = this.decodeJwtBody(captureContext).ctx[0].data;
+                } catch (error) {
+                    this.handleMountError('Invalid capture context');
+
+                    return;
+                }
+
+                const existing = document.querySelector('script[data-uc-lib="' + CSS.escape(ctx.clientLibrary) + '"]');
+
+                if (existing) {
+                    if (typeof window.Accept === 'function') {
+                        this.mountUnifiedCheckout(captureContext, generation);
+                    } else {
+                        existing.addEventListener(
+                            'load',
+                            () => this.mountUnifiedCheckout(captureContext, generation)
+                        );
+                    }
+
+                    return;
+                }
+
+                const script = document.createElement('script');
+                script.type = 'text/javascript';
+                script.src = ctx.clientLibrary;
+                script.setAttribute('data-uc-lib', ctx.clientLibrary);
+
+                if (ctx.clientLibraryIntegrity) {
+                    script.integrity = ctx.clientLibraryIntegrity;
+                    script.crossOrigin = 'anonymous';
+                }
+
+                script.addEventListener('load', () => {
+                    if (this.isCurrentGeneration(generation)) {
+                        this.mountUnifiedCheckout(captureContext, generation);
+                    }
+                });
+                script.addEventListener('error', () => {
+                    script.remove();
+
+                    if (this.isCurrentGeneration(generation)) {
+                        this.handleMountError('Unable to load payment library');
+                    }
+                });
+
+                document.head.appendChild(script);
+            },
+
+            mountUnifiedCheckout: function(captureContext, generation) {
+                if (!this.isCurrentGeneration(generation)) {
+                    return;
+                }
+
+                if (typeof window.Accept !== 'function') {
+                    this.handleMountError('Payment library unavailable');
+
+                    return;
+                }
+
+                window.Accept(captureContext)
+                    .then(acceptInstance => {
+                        // false = embedded layout (sidebar rejects the paymentScreen container)
+                        return acceptInstance.unifiedPayments(false);
+                    })
+                    .then(unifiedPayments => {
+                        return unifiedPayments.show({
+                            containers: {
+                                paymentSelection: '#{$code}_uc_selection',
+                                paymentScreen: '#{$code}_uc_screen',
+                            },
+                        });
+                    })
+                    .then(transientTokenJwt => {
+                        // A token from a superseded mount belongs to a dead context; never accept it.
+                        if (this.isCurrentGeneration(generation)) {
+                            this.handleTransientToken(transientTokenJwt);
+                        }
+                    })
+                    .catch(error => {
+                        if (this.isCurrentGeneration(generation)) {
+                            this.handleMountError(error && error.message ? error.message : null);
+                        }
+                    });
+
+                // NB: the failure latch is deliberately NOT cleared here — a mount being underway
+                // proves nothing (the 0-height failure mode reaches this point every time). It is
+                // cleared once checkMountHealth() confirms a healthy mount.
+                this.loading = false;
+                this.scheduleContextRefresh(captureContext);
+                this.scheduleMountHealthCheck(MOUNT_HEALTH_CHECK_MS);
+            },
+
+            handleTransientToken: function(transientTokenJwt) {
+                if (!transientTokenJwt) {
+                    return;
+                }
+
+                this.transientToken = transientTokenJwt;
+                this.newCardEntered = true;
+
+                // Card entry is done: the capture context has served its purpose; the token's own
+                // lifetime takes over. A pending health check is likewise moot.
+                this.clearTimer('_contextTimer');
+                this.clearTimer('_healthTimer');
+                this._activeGeneration = null;
+                this.scheduleTokenExpiry(transientTokenJwt);
+
+                this.selectedCard = NEW_CARD_ID;
+            },
+
+            handleMountError: function(message) {
+                this._mountFailures++;
+                this.loading = false;
+
+                // The cycle died here; release the in-flight guard so a retry is possible.
+                this._activeGeneration = null;
+                this.clearTimer('_healthTimer');
+
+                this.showError(message || '{$tServerError}');
+            },
+
+            // --- Card selection ------------------------------------------------------------------
+
+            handleSelectedCardChange: function() {
+                const selected = this.selectedCard;
+
+                if (selected === this._lastSelectedCard) {
+                    return;
+                }
+
+                this._lastSelectedCard = selected;
+                this.updateStoredCardState();
+                this.toggleOrderButton();
+
+                if (selected === NEW_CARD_ID) {
+                    return;
+                }
+
+                if (selected) {
+                    // A real stored card is now selected; abandon any pending/mounted drop-in.
+                    this.resetDropinState();
+
+                    return;
+                }
+
+                // Explicit return to "Add new card": clear the failure latch so a past transient
+                // failure does not dead-end a deliberate retry.
+                this._mountFailures = 0;
+
+                // Re-entering a card after already tokenizing one: drop the captured token and its
+                // timer so the abandoned token cannot outlive the entry it came from.
+                if (this.transientToken) {
+                    this.resetDropinState();
+                }
+
+                this.maybeMountDropin();
+            },
+
+            updateStoredCardState: function() {
+                const selected = this.selectedCard;
+
+                if (selected && selected !== NEW_CARD_ID) {
+                    this.state.cc_type = this.storedCards[selected]?.type || '';
+                    this.state.cc_cid_length = this.state.cc_type === 'AE' ? 4 : 3;
+                }
+            },
+
+            handleMethodActivate: function(event) {
+                this.toggleOrderButton(event);
+
+                if (event && event.detail && event.detail.method === '{$code}') {
+                    // Defer a tick so the payment form is visible before the mount health checks run.
+                    window.setTimeout(this.maybeMountDropin.bind(this), 0);
+                }
+            },
+
+            /**
+             * Hide the place-order button while the drop-in is collecting card data — the drop-in
+             * has its own continue button which resolves the transient token; place-order returns
+             * once a stored card is selected or the new card is tokenized.
+             */
+            toggleOrderButton: function(event) {
+                const method = event && event.detail
+                    ? event.detail.method
+                    : document.querySelector('input[name="payment-method-option"]:checked')?.value;
+
+                const orderBtn = document.querySelector('.btn-primary[x-bind~="buttonPlaceOrder"]');
+
+                if (orderBtn) {
+                    orderBtn.style.display = (method === '{$code}' && this.selectedCard === '') ? 'none' : 'block';
+                }
+            },
+
+            // --- Expiry + health timers ----------------------------------------------------------
+
+            clearTimer: function(handle) {
+                if (this[handle]) {
+                    clearTimeout(this[handle]);
+                    this[handle] = null;
+                }
+            },
+
+            decodeJwtBody: function(jwt) {
+                let payload = jwt.split('.')[1];
+                payload = payload.replace(/-/g, '+').replace(/_/g, '/');
+                while (payload.length % 4) {
+                    payload += '=';
+                }
+
+                return JSON.parse(window.atob(payload));
+            },
+
+            /**
+             * How long to wait before acting on a JWT's expiry. Floored rather than zero because a
+             * skewed client clock can read a fresh JWT as already expired, and a zero delay there
+             * means an unbounded loop of signed capture-context calls.
+             */
+            getRefreshDelay: function(jwt) {
+                let expiry = null;
+
+                try {
+                    const body = this.decodeJwtBody(jwt);
+                    expiry = typeof body.exp === 'number' ? body.exp * 1000 : null;
+                } catch (error) {
+                    expiry = null;
+                }
+
+                if (expiry === null) {
+                    return FALLBACK_TTL_MS;
+                }
+
+                return Math.max(MIN_EXPIRY_DELAY_MS, expiry - Date.now() - EXPIRY_MARGIN_MS);
+            },
+
+            scheduleContextRefresh: function(captureContext) {
+                this.clearTimer('_contextTimer');
+
+                this._contextTimer = setTimeout(
+                    this.handleContextExpiry.bind(this),
+                    this.getRefreshDelay(captureContext)
+                );
+            },
+
+            /**
+             * The capture context lapsed with nothing entered that a re-mount would destroy; swap in
+             * a fresh one silently — unless a token was captured, in which case the context is spent
+             * and the token timer owns expiry.
+             */
+            handleContextExpiry: function() {
+                this._contextTimer = null;
+
+                if (this.transientToken) {
+                    return;
+                }
+
+                this.remountDropin();
+            },
+
+            scheduleTokenExpiry: function(transientTokenJwt) {
+                this.clearTimer('_tokenTimer');
+
+                this._tokenTimer = setTimeout(
+                    this.handleTokenExpiry.bind(this),
+                    this.getRefreshDelay(transientTokenJwt)
+                );
+            },
+
+            /**
+             * The captured token lapsed and the server would now reject it. Unlike a context refresh
+             * this destroys completed card entry, so it is always announced.
+             */
+            handleTokenExpiry: function() {
+                this._tokenTimer = null;
+
+                this.remountDropin();
+
+                this.showError(
+                    '{$tSessionExpired}'
+                );
+            },
+
+            scheduleMountHealthCheck: function(delay) {
+                this.clearTimer('_healthTimer');
+
+                this._healthTimer = setTimeout(this.checkMountHealth.bind(this), delay);
+            },
+
+            /**
+             * Recover from a mount that attached but never became usable (the 0-height iframe case).
+             * This is also the only place a mount is confirmed to have worked, so it owns clearing
+             * the failure latch.
+             */
+            checkMountHealth: function() {
+                this._healthTimer = null;
+
+                // The mount cycle ends here however it went; release the in-flight guard before any
+                // branch below can return.
+                this._activeGeneration = null;
+
+                const screen = document.getElementById('{$code}_uc_screen');
+
+                if (this.transientToken
+                    || screen === null
+                    || screen.offsetParent === null) {
+                    return;
+                }
+
+                if (this.isDropinMounted()) {
+                    this._mountFailures = 0;
+
+                    return;
+                }
+
+                this._mountFailures++;
+
+                if (this._mountFailures >= MAX_MOUNT_FAILURES) {
+                    this.showError(
+                        '{$tLoadFailed}'
+                    );
+
+                    return;
+                }
+
+                this.remountDropin();
+            },
+
+            remountDropin: function() {
+                this.resetDropinState();
+                this.maybeMountDropin();
+            },
+
+            /**
+             * Tear down any mounted/in-flight drop-in: cancel timers, abort the in-flight request,
+             * drop the captured token + synthetic card, and empty the containers.
+             */
+            resetDropinState: function() {
+                this.clearTimer('_contextTimer');
+                this.clearTimer('_tokenTimer');
+                this.clearTimer('_healthTimer');
+
+                // Invalidate any cycle still in flight: bumping the generation makes its callbacks
+                // no-ops, so a load or mount started before this teardown cannot land afterwards.
+                this._generation++;
+                this._activeGeneration = null;
+
+                if (this._abortController) {
+                    this._abortController.abort();
+                    this._abortController = null;
+                }
+
+                this.transientToken = null;
+                this.newCardEntered = false;
+                this.mountTotal = null;
+                this.loading = false;
+
+                if (this.selectedCard === NEW_CARD_ID) {
+                    this.selectedCard = '';
+                }
+
+                document.getElementById('{$code}_uc_selection')?.replaceChildren();
+                document.getElementById('{$code}_uc_screen')?.replaceChildren();
+            },
+
+            // --- Submit --------------------------------------------------------------------------
+
+            prepareSubmit: async function(event) {
+                const resolve = event?.detail?.resolve || (() => {});
+                const reject = event?.detail?.reject || (() => {});
+
+                const payload = {
+                    method: '{$code}',
+                    card_id: '',
+                    transient_token: '',
+                    cc_cid: this.ccCid || '',
+                    save: this.save ? '1' : '0',
+                };
+
+                if (this.selectedCard && this.selectedCard !== NEW_CARD_ID) {
+                    if (this.config.requireCcv && this.ccCid.length !== this.state.cc_cid_length) {
+                        this.showError('{$tInvalidCvv}');
+                        reject();
+
+                        return;
+                    }
+
+                    payload.card_id = this.selectedCard;
+                } else if (this.transientToken) {
+                    // The capture mandate amount is baked into the token; if the order total moved
+                    // (coupon, shipping change) since the mount, force re-entry against a fresh,
+                    // correctly-priced context instead of authorizing a mismatched amount.
+                    try {
+                        const total = await this.\$wire.call('getQuoteTotal');
+
+                        if (this.mountTotal !== null && total !== this.mountTotal) {
+                            this.remountDropin();
+                            this.showError(
+                                '{$tTotalChanged}'
+                            );
+                            reject();
+
+                            return;
+                        }
+                    } catch (error) {
+                        // Total verification is best-effort; the gateway enforces the real amount.
+                    }
+
+                    payload.transient_token = this.transientToken;
+                } else {
+                    this.showError('{$tCompleteForm}');
+                    reject();
+
+                    return;
+                }
+
+                hyvaCheckout.storage.setValue('payment', payload);
+                resolve(true);
+            },
+
+            // --- Misc ----------------------------------------------------------------------------
+
+            /**
+             * Inject the CyberSource Decision Manager (online-metrix) device-fingerprint tag, once.
+             */
+            loadFingerprint: function() {
+                if (!this.config.fingerprintUrl || this.config.fingerprintUrl.length <= 1) {
+                    return;
+                }
+
+                if (document.querySelector('script[data-cybs-fingerprint]')) {
+                    return;
+                }
+
+                const script = document.createElement('script');
+                script.type = 'text/javascript';
+                script.src = this.config.fingerprintUrl;
+                script.setAttribute('data-cybs-fingerprint', this.config.fingerprintUrl);
+                document.head.appendChild(script);
+            },
+
+            showError: function(message) {
+                if (typeof window.dispatchMessages === 'function') {
+                    window.dispatchMessages([{type: 'error', text: message}], 5000);
+                } else {
+                    window.alert(message);
+                }
+            },
+
+            validateCvv: function(e) {
                 const cvv = e.target.value;
                 const valid = (cvv.length === this.state.cc_cid_length);
 
-                e.target.setCustomValidity(valid ? '' : "{$escaper->escapeHtml(__('Please enter a valid CVV.'))}");
+                e.target.setCustomValidity(valid ? '' : '{$tInvalidCvv}');
                 if (!valid) {
                     e.target.reportValidity();
                 }
-
-                return this.setCcCid();
             },
-            getCcCid() {return this.payment.cc_cid},
+
+            // --- Getters for template bindings ---
             getCcCidLength() {return this.state.cc_cid_length},
             getCcCidPlaceholder() {return this.state.cc_cid_length === 4 ? '0000' : '000'},
-            hideHostedForm() {return !this.showHostedForm},
-            hideTermsNotice() {return !this.showTermsNotice},
-            isStoredCardSelected() {return this.storedCard?.hash === this.selectedCard},
-            setCcCid() {return this.payment.cc_cid = this.\$el.value},
-            setSelectedCard() {return this.selectedCard = this.\$el.value},
-            showStoredCards() {return Object.keys(this.storedCards).length > 0},
+            showDropin() {return this.selectedCard === ''},
+            showStoredCards() {return Object.keys(this.storedCards).length > 0 || this.newCardEntered},
+            showCvvField() {return !!this.selectedCard && this.selectedCard !== NEW_CARD_ID},
+            showSaveOption() {
+                return this.config.canSaveCard
+                    && this.newCardEntered
+                    && this.selectedCard === NEW_CARD_ID;
+            },
         }
     }
 
@@ -469,19 +723,3 @@ JS;
 <script><?= /* @noEscape */
     $inlineScript ?></script>
 <?php $hyvaCsp->registerInlineScript() ?>
-
-<?php $inlineStyle = <<<CSS
-    \#{$code}_iframe {
-        min-width: 300px;
-        height: 400px;
-        border: 0;
-    }
-CSS;
-?>
-<?php if (isset($secureRenderer) && $secureRenderer instanceof SecureHtmlRenderer): ?>
-    <?= /* @noEscape */
-    $secureRenderer->renderTag('style', [], $inlineStyle, false) ?>
-<?php else: ?>
-    <style><?= /* @noEscape */
-        $inlineStyle ?></style>
-<?php endif; ?>

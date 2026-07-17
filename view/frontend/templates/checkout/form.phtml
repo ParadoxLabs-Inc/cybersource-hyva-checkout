@@ -38,12 +38,10 @@ $formBlock = $formViewModel->getFormBlock($code);
 $method = $formBlock->getMethod();
 $image = $formBlock->getBrandingImage();
 ?>
-<div class="<?= /* @noEscape */
-$code ?>"
-     x-data="<?= /* @noEscape */
-     $code ?>PaymentForm"
+<div class="<?= /* @noEscape */ $code ?>"
+     x-data="<?= /* @noEscape */ $code ?>PaymentForm"
      x-init="initForm"
-     data-config='<?= $escaper->escapeJsQuote(json_encode($block->getConfig())) ?>'
+     data-config="<?= $escaper->escapeHtmlAttr(json_encode($block->getConfig())) ?>"
 >
     <?php if ($image): ?>
         <div class="flex justify-end mb-2">
@@ -54,57 +52,55 @@ $code ?>"
     <?php endif; ?>
 
     <div class="field required mb-2" x-show="showStoredCards" x-cloak>
-        <label for="<?= /* @noEscape */
-        $code ?>-card-id" class="label text-gray-700 text-sm">
+        <label for="<?= /* @noEscape */ $code ?>-card-id" class="label text-gray-700 text-sm">
             <?= $escaper->escapeHtml(__('Payment Information')) ?>
         </label>
-        <select id="<?= /* @noEscape */
-        $code ?>-card-id"
+        <select id="<?= /* @noEscape */ $code ?>-card-id"
                 class="block w-full shadow-sm border-gray-300 rounded-md"
-                :value="selectedCard"
-                @change="setSelectedCard"
+                x-model="selectedCard"
         >
             <template x-for="storedCard in storedCards" :key="storedCard.hash">
                 <option :value="storedCard.hash"
                         :data-type="storedCard.type"
-                        :data-cc_bin="storedCard.cc_bin"
-                        :selected="isStoredCardSelected"
                         x-text="storedCard.label">
                 </option>
             </template>
-            <option value=''><?= $escaper->escapeHtml(__('Add new card')) ?></option>
+            <template x-if="newCardEntered">
+                <option value="unified_checkout_new"><?= $escaper->escapeHtml(__('New Card')) ?></option>
+            </template>
+            <option value=""><?= $escaper->escapeHtml(__('Add new card')) ?></option>
         </select>
 
         <input type="text" class="hidden" autocomplete="cc-type"/>
     </div>
 
-    <div class="card p-0"
-         x-show="showHostedForm"
+    <!--
+        Unified Checkout drop-in containers. wire:ignore so Magewire DOM morphs never wipe the
+        mounted UC iframe; all lifecycle management happens client-side in scripts.phtml.
+    -->
+    <div class="card p-0 relative"
+         x-show="showDropin"
          wire:ignore
     >
-        <iframe src="about:blank" id="<?= /* @noEscape */
-        $code ?>_iframe" name="<?= /* @noEscape */
-        $code ?>_iframe" class="w-full" x-show="hideTermsNotice" x-cloak></iframe>
-        <p x-show="showTermsNotice" x-cloak class="text-secondary p-4"><?= $escaper->escapeHtml(
-                __('Please accept the %1 to complete payment.', __('Terms and Conditions'))
-            ) ?></p>
-    </div>
-
-    <?php if (!$formBlock->isGuestCheckout() && (bool)$method->getConfigData('allow_unsaved') === false): ?>
-        <div x-show="showHostedForm" x-cloak>
-            <p class="text-secondary mt-4 text-sm"><?= $escaper->escapeHtml(
-                    __('For your convenience, this data will be stored securely by our payment processor.')
-                ) ?></p>
+        <div x-show="loading" x-cloak class="flex justify-center p-4">
+            <svg class="animate-spin h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                 aria-label="<?= $escaper->escapeHtmlAttr(__('Loading payment form')) ?>">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135
+                         5.824 3 7.938l3-2.647z"></path>
+            </svg>
         </div>
-    <?php endif; ?>
+        <div id="<?= /* @noEscape */ $code ?>_uc_selection" class="unified-checkout-selection"></div>
+        <div id="<?= /* @noEscape */ $code ?>_uc_screen" class="unified-checkout-screen w-full"></div>
+    </div>
 
     <?php if ($formBlock->hasVerification() && $method->getConfigData('require_ccv')): ?>
         <div class="field required"
-             x-show="hideHostedForm"
+             x-show="showCvvField"
              x-cloak
         >
-            <label for="<?= /* @noEscape */
-            $code ?>-cc-cid"
+            <label for="<?= /* @noEscape */ $code ?>-cc-cid"
                    class="label text-gray-700 text-sm"
             >
                 <?= $escaper->escapeHtml(__('Card Verification Number')) ?>
@@ -113,10 +109,9 @@ $code ?>"
                    inputmode="numeric"
                    title="<?= $escaper->escapeHtmlAttr(__('Card Verification Number')) ?>"
                    class="block w-16 shadow-sm border-gray-300 rounded-md font-mono font-medium leading-normal tracking-wider transition text-center"
-                   id="<?= /* @noEscape */
-                   $code ?>-cc-cid"
+                   id="<?= /* @noEscape */ $code ?>-cc-cid"
                    name="payment[cc_cid]"
-                   :value="payment.cc_cid"
+                   x-model="ccCid"
                    @change="validateCvv"
                    value=""
                    autocomplete="cc-csc"
@@ -129,6 +124,28 @@ $code ?>"
         </div>
     <?php endif; ?>
 
-    <?= /* @noEscape */
-    $block->getChildHtml(); ?>
+    <?php if (!$formBlock->isGuestCheckout()): ?>
+        <?php if ((bool)$method->getConfigData('allow_unsaved') === false): ?>
+            <div x-show="showSaveOption" x-cloak>
+                <p class="text-secondary mt-4 text-sm"><?= $escaper->escapeHtml(
+                    __('For your convenience, this data will be stored securely by our payment processor.')
+                ) ?></p>
+            </div>
+        <?php else: ?>
+            <div class="field choice mt-4" x-show="showSaveOption" x-cloak>
+                <input type="checkbox"
+                       id="<?= /* @noEscape */ $code ?>-save"
+                       name="payment[save]"
+                       value="1"
+                       class="checkbox"
+                       x-model="save"
+                />
+                <label for="<?= /* @noEscape */ $code ?>-save" class="label text-sm">
+                    <?= $escaper->escapeHtml(__('Save for next time')) ?>
+                </label>
+            </div>
+        <?php endif; ?>
+    <?php endif; ?>
+
+    <?= /* @noEscape */ $block->getChildHtml(); ?>
 </div>

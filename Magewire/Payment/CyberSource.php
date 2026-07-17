@@ -28,15 +28,19 @@ use Magento\Checkout\Model\Session as CheckoutSession;
 use Magento\Payment\Model\MethodInterface;
 use Magento\Quote\Api\Data\CartInterface;
 use Magewirephp\Magewire\Component\Form;
-use ParadoxLabs\CyberSource\Model\Config\Config;
-use ParadoxLabs\CyberSource\Model\Service\SecureAcceptance\FrontendRequest;
 use ParadoxLabs\CyberSourceHyvaCheckout\ViewModel\PaymentForm;
 use ParadoxLabs\TokenBase\Api\CardRepositoryInterface;
 use ParadoxLabs\TokenBase\Api\Data\CardInterface;
 use ParadoxLabs\TokenBase\Block\Form\Cc;
-use ParadoxLabs\TokenBase\Helper\Data;
 use Rakit\Validation\Validator;
 
+/**
+ * Magewire component for the CyberSource Unified Checkout payment form.
+ *
+ * Card entry happens client-side in the UC drop-in (see scripts.phtml); this component owns the
+ * stored-card list, the place-order evaluation, and the server-side quote data the client needs
+ * to keep the capture context honest (grand total drift detection at submit).
+ */
 class CyberSource extends Form implements EvaluationInterface
 {
     protected const METHOD_CODE = 'paradoxlabs_cybersource';
@@ -49,17 +53,19 @@ class CyberSource extends Form implements EvaluationInterface
             'billing_address_activated' => 'Loading payment form',
             'billing_address_saved' => 'Loading payment form',
             'billing_address_submitted' => 'Loading payment form',
-            'getNewCard' => 'Updating payment data',
         ];
 
     /**
+     * The capture context's billTo is sourced from the quote billing address, so any billing
+     * change invalidates a not-yet-used context; signal the browser so the drop-in can (re)mount.
+     *
      * @var string[]
      */
     protected $listeners
         = [
-            'billing_address_activated' => 'initHostedForm',
-            'billing_address_saved' => 'initHostedForm',
-            'billing_address_submitted' => 'initHostedForm',
+            'billing_address_activated' => 'triggerBillingUpdate',
+            'billing_address_saved' => 'triggerBillingUpdate',
+            'billing_address_submitted' => 'triggerBillingUpdate',
         ];
 
     /* Public component properties */
@@ -74,17 +80,13 @@ class CyberSource extends Form implements EvaluationInterface
     /**
      * @param \Rakit\Validation\Validator $validator
      * @param \Magento\Checkout\Model\Session $checkoutSession
-     * @param \ParadoxLabs\CyberSource\Model\Service\SecureAcceptance\FrontendRequest $secureAcceptRequest
      * @param \ParadoxLabs\TokenBase\Api\CardRepositoryInterface $cardRepository
-     * @param \ParadoxLabs\TokenBase\Helper\Data $helper
      * @param \ParadoxLabs\CyberSourceHyvaCheckout\ViewModel\PaymentForm $formViewModel
      */
     public function __construct(
         Validator $validator,
         protected CheckoutSession $checkoutSession,
-        protected FrontendRequest $secureAcceptRequest,
         protected CardRepositoryInterface $cardRepository,
-        protected Data $helper,
         protected PaymentForm $formViewModel,
     ) {
         parent::__construct($validator);
@@ -126,21 +128,27 @@ class CyberSource extends Form implements EvaluationInterface
     }
 
     /**
-     * Generate Secure Acceptance form params and dispatch to browser
-     *
-     * @see \ParadoxLabs\CyberSource\Model\Service\SecureAcceptance\FrontendRequest
+     * Notify the browser that the billing address changed, so the drop-in can mount or re-mint
+     * its capture context against the updated billTo.
      */
-    public function initHostedForm(): void
+    public function triggerBillingUpdate(): void
     {
-        $params = [
-            'iframeAction' => $this->secureAcceptRequest->getIframeUrl(),
-            'iframeParams' => $this->secureAcceptRequest->getIframeParams(),
-        ];
+        $this->dispatchBrowserEvent(static::METHOD_CODE . 'BillingUpdated', []);
+    }
 
-        $this->dispatchBrowserEvent(
-            static::METHOD_CODE . 'InitHostedForm',
-            $params,
-        );
+    /**
+     * Get the quote base grand total, for client-side capture-context amount drift detection.
+     *
+     * The capture mandate amount is baked into the capture context (and any transient token minted
+     * against it), so the client compares this at mount time and again at submit; a mismatch forces
+     * re-entry against a freshly priced context.
+     *
+     * @throws \Magento\Framework\Exception\LocalizedException
+     * @throws \Magento\Framework\Exception\NoSuchEntityException
+     */
+    public function getQuoteTotal(): string
+    {
+        return number_format((float)$this->getQuote()->getBaseGrandTotal(), 4, '.', '');
     }
 
     /**
@@ -198,46 +206,6 @@ class CyberSource extends Form implements EvaluationInterface
         foreach ($this->getFormBlock()->getStoredCards() as $card) {
             $this->addStoredCardToList($card);
         }
-    }
-
-    /**
-     * Handle communicator failure notification from frontend
-     */
-    public function notifyCommunicatorFailure(): void
-    {
-        $this->helper->log(static::METHOD_CODE, 'ERROR: User failed to load hosted form communicator');
-
-        $this->dispatchErrorMessage(
-            __(
-                'Payment gateway failed to connect. Please reload and try again. '
-                . 'If the problem continues, please seek support.'
-            ),
-        );
-    }
-
-    /**
-     * Import a newly saved card from Secure Acceptance response
-     *
-     * The card was already saved server-side by complete.phtml -> SecureAcceptance\Response::saveCard().
-     * This method fetches it by hash and adds to the component's storedCards list.
-     *
-     * @param array $data Card data from postMessage (includes 'id' hash)
-     * @throws \Magento\Framework\Exception\LocalizedException
-     */
-    public function getNewCard(array $data = []): void
-    {
-        if (empty($data['id'])) {
-            return;
-        }
-
-        $card = $this->cardRepository->getByHash($data['id']);
-
-        if ($card->getMethod() !== static::METHOD_CODE
-            || (int)$card->getCustomerId() !== (int)$this->getQuote()->getCustomerId()) {
-            return;
-        }
-
-        $this->addStoredCardToList($card);
     }
 
     protected function addStoredCardToList(CardInterface $card): void
