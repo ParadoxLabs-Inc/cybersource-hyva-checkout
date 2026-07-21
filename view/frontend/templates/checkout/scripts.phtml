@@ -117,6 +117,10 @@ $inlineScript = <<<JS
                 window.addEventListener('{$code}BillingUpdated', this.handleBillingUpdated.bind(this));
                 // Hyva dispatches this on window (init-payment.phtml); a document listener never fires.
                 window.addEventListener('checkout:payment:method-activate', this.handleMethodActivate.bind(this));
+                // Dispatched by the Hyva place-order service processor on any placement failure; a
+                // transient token is single-use and the capture context it was minted against is
+                // spent once submitted, so a declined new-card attempt must never be resubmitted.
+                window.addEventListener('order:place:{$code}:error', this.handleOrderError.bind(this));
 
                 this.\$watch('selectedCard', this.handleSelectedCardChange.bind(this));
 
@@ -576,6 +580,23 @@ $inlineScript = <<<JS
             },
 
             // --- Submit --------------------------------------------------------------------------
+
+            /**
+             * A placement failure (decline, gateway error) spends the capture context the transient
+             * token was minted against, so the token can never be resubmitted. Drop it and re-mint a
+             * fresh drop-in so the next attempt tokenizes anew, rather than replaying a dead token.
+             *
+             * The decline message itself is surfaced by the server (evaluateCompletion) through the
+             * standard messenger, so this reset stays silent — no showError() here — to avoid a
+             * second, duplicate error. resetDropinState() does not touch the mount-failure latch, so
+             * an ordinary decline never counts against MAX_MOUNT_FAILURES. Stored-card attempts have
+             * no token to spend; remountDropin() is a no-op while a card is selected (guarded).
+             */
+            handleOrderError: function() {
+                if (this.selectedCard === NEW_CARD_ID || this.transientToken) {
+                    this.remountDropin();
+                }
+            },
 
             prepareSubmit: async function(event) {
                 const resolve = event?.detail?.resolve || (() => {});
