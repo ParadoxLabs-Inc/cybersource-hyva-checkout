@@ -34,6 +34,8 @@ $tLoadFailed     = $escaper->escapeJs(__('The payment form could not be loaded. 
 $tInvalidCvv     = $escaper->escapeJs(__('Please enter a valid CVV.'));
 $tTotalChanged   = $escaper->escapeJs(__('Your order total changed. Please re-enter your card details.'));
 $tCompleteForm   = $escaper->escapeJs(__('Please complete the payment form.'));
+$tNewCard        = $escaper->escapeJs(__('New Card'));
+$tCardLabel      = $escaper->escapeJs(__('%1 ****%2'));
 $inlineScript = <<<JS
     'use strict';
 
@@ -73,6 +75,10 @@ $inlineScript = <<<JS
             storedCards: this.\$wire.entangle('storedCards'),
             selectedCard: '',
             newCardEntered: false,
+            // Display metadata decoded from the transient token (pdlCybsUc.getCardMetadata());
+            // null until a tokenization resolves. Display-only — the server decodes the token
+            // itself for the authoritative cc_* values.
+            newCardMeta: null,
             transientToken: null,
             save: true,
             ccCid: '',
@@ -300,6 +306,10 @@ $inlineScript = <<<JS
                 this.transientToken = transientTokenJwt;
                 this.newCardEntered = true;
 
+                // Label the synthetic new-card entry with the card identity decoded from the token,
+                // so the selector reads e.g. "Visa ****1111" rather than a bare "New Card".
+                this.newCardMeta = window.pdlCybsUc.getCardMetadata(transientTokenJwt);
+
                 // Card entry is done: the capture context has served its purpose; the token's own
                 // lifetime takes over. A pending health check is likewise moot.
                 this.clearTimer('_contextTimer');
@@ -308,6 +318,73 @@ $inlineScript = <<<JS
                 this.scheduleTokenExpiry(transientTokenJwt);
 
                 this.selectedCard = NEW_CARD_ID;
+
+                // NEW-CARD TOKENIZATION ONLY, and only from here: this handler is the sole
+                // resolution point of a user-driven tokenize, and the generation guard upstream
+                // already discarded superseded cycles (remount/total-change/expiry), so this fires
+                // at most once per tokenization. Stored cards keep CVV entry + manual Place Order.
+                this.maybeAutoPlaceOrder();
+            },
+
+            /**
+             * Selector label for a freshly tokenized card: "{Brand} ****{last4}" when the token
+             * carries card metadata, the wallet name for wallet tokens, else a generic "New Card".
+             */
+            getNewCardLabel: function() {
+                const meta = this.newCardMeta;
+
+                if (meta && meta.label && meta.last4) {
+                    return '{$tCardLabel}'
+                        .replace('%1', meta.label)
+                        .replace('%2', meta.last4);
+                }
+
+                if (meta && window.pdlCybsUc.getWalletLabel(meta.paymentType)) {
+                    return window.pdlCybsUc.getWalletLabel(meta.paymentType);
+                }
+
+                return '{$tNewCard}';
+            },
+
+            /**
+             * Place the order automatically after a fresh tokenization, when configured.
+             *
+             * Only when any rendered terms-conditions component reports every agreement accepted;
+             * otherwise the customer falls back to the always-rendered manual Place Order button
+             * (which Hyva's own evaluation gates on the agreements). A server-side failure flows
+             * through handleOrderError like a manual submit — the consumed token forces a re-mount
+             * without touching the MAX_MOUNT_FAILURES latch, so declines cannot dead-end or loop
+             * the drop-in, and auto-place cannot refire until the customer completes card entry
+             * again.
+             */
+            maybeAutoPlaceOrder: function() {
+                if (!this.config.autoPlaceOrder || !this.areAgreementsAccepted()) {
+                    return;
+                }
+
+                hyvaCheckout.order.place();
+            },
+
+            /**
+             * Whether every checkout agreement is accepted. Pre-checked client-side (same pattern
+             * as the Hyva terms-conditions component's own state) because an auto-place attempt
+             * that fails server-side on agreements would spend the single-use transient token and
+             * force needless card re-entry. No rendered terms component means nothing to accept.
+             */
+            areAgreementsAccepted: function() {
+                try {
+                    const terms = Magewire.find('checkout.terms-conditions').get('termAcceptance');
+
+                    for (const key in terms) {
+                        if (terms[key] === false) {
+                            return false;
+                        }
+                    }
+                } catch (error) {
+                    // No-op -- the terms component may not exist (no agreements configured).
+                }
+
+                return true;
             },
 
             handleMountError: function(message) {
@@ -568,6 +645,7 @@ $inlineScript = <<<JS
 
                 this.transientToken = null;
                 this.newCardEntered = false;
+                this.newCardMeta = null;
                 this.mountTotal = null;
                 this.loading = false;
 
@@ -693,9 +771,14 @@ $inlineScript = <<<JS
             showStoredCards() {return Object.keys(this.storedCards).length > 0 || this.newCardEntered},
             showCvvField() {return !!this.selectedCard && this.selectedCard !== NEW_CARD_ID},
             showSaveOption() {
-                return this.config.canSaveCard
-                    && this.newCardEntered
-                    && this.selectedCard === NEW_CARD_ID;
+                if (!this.config.canSaveCard) {
+                    return false;
+                }
+
+                // An empty selection means the customer is entering a new card in the drop-in; the
+                // save choice renders alongside it so consent happens BEFORE tokenization
+                // (auto-place submits straight from the drop-in, with no pause to ask after).
+                return this.selectedCard === '' || this.selectedCard === NEW_CARD_ID;
             },
         }
     }
