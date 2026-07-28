@@ -653,6 +653,7 @@ $inlineScript = <<<JS
                     this.selectedCard = '';
                 }
 
+                window.pdlCybsUc.releaseHeightRatchet('#{$code}_uc_selection');
                 document.getElementById('{$code}_uc_selection')?.replaceChildren();
                 document.getElementById('{$code}_uc_screen')?.replaceChildren();
             },

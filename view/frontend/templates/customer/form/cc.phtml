@@ -327,6 +327,7 @@ $tLoadFailed  = $escaper->escapeJs(__('The payment form could not be loaded. Ple
                         token.value = '';
                     }
 
+                    window.pdlCybsUc.releaseHeightRatchet('#<?= /* @noEscape */ $code ?>_uc_selection');
                     document.getElementById('<?= /* @noEscape */ $code ?>_uc_selection')?.replaceChildren();
                     document.getElementById('<?= /* @noEscape */ $code ?>_uc_screen')?.replaceChildren();
                 },

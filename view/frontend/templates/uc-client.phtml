@@ -47,6 +47,9 @@
         const EXPIRY_MARGIN_MS = 60 * 1000;
         const MIN_EXPIRY_DELAY_MS = 30 * 1000;
         const FALLBACK_TTL_MS = 14 * 60 * 1000;
+        // Ceiling on the height floor ratchetHeight() will hold, as a backstop against a
+        // pathological grow-measure-grow cycle. UC's tallest screens land well under this.
+        const MAX_RATCHET_PX = 1000;
         // CyberSource numeric card-type codes -> Magento type code + display brand. Must agree with
         // the server-side map in the base module's Model/Source/CardType, which remains
         // authoritative for the stored cc_type.
@@ -237,6 +240,9 @@
              * the captured transient-token JWT.
              */
             mountUnifiedPayments(captureContext, selectionSelector, screenSelector) {
+                // Idempotent, and armed before the mount so the very first screen sets the floor.
+                this.ratchetHeight(selectionSelector, screenSelector);
+
                 return window.Accept(captureContext)
                     .then(acceptInstance => {
                         // false = embedded layout (sidebar rejects the paymentScreen container)
@@ -250,6 +256,73 @@
                             },
                         });
                     });
+            },
+
+            /**
+             * Hold the drop-in's wrapper at the tallest height its mount containers have reached.
+             *
+             * UC clears its containers between steps (payment selection -> card form -> review) and
+             * paints the next screen a frame or more later, so the drop-in momentarily collapses to
+             * near zero and everything below it — the save checkbox, agreements, Place Order — jumps
+             * up and back down on every transition. A ratcheted min-height absorbs the collapse.
+             * Growth is left alone: UC animates its own expansion, and clamping that would fight it.
+             *
+             * The floor goes on the wrapper, never on the mount containers themselves: the pages'
+             * isDropinMounted() reads the screen container's own height to catch a UC iframe that
+             * attached at 0x0, and a min-height there would make every dead mount measure as healthy.
+             *
+             * Heights are measured off the containers rather than the wrapper being written to.
+             * Observing an element whose min-height we set invites a feedback loop wherever the
+             * measurement and the min-height disagree on box model, each pass ratcheting up by the
+             * padding.
+             *
+             * No-op without ResizeObserver — the drop-in just keeps bouncing, as it does today.
+             */
+            ratchetHeight(selectionSelector, screenSelector) {
+                const containers = [
+                    document.querySelector(selectionSelector),
+                    document.querySelector(screenSelector),
+                ].filter(Boolean);
+                const wrapper = containers.length > 0 ? containers[0].parentElement : null;
+
+                if (typeof window.ResizeObserver !== 'function'
+                    || wrapper === null
+                    || wrapper.pdlUcRatchet !== undefined) {
+                    return;
+                }
+
+                let peak = 0;
+                const observer = new window.ResizeObserver(() => {
+                    const height = containers.reduce(
+                        (total, container) => total + container.offsetHeight,
+                        0
+                    );
+
+                    if (height > peak) {
+                        peak = Math.min(height, MAX_RATCHET_PX);
+                        wrapper.style.minHeight = peak + 'px';
+                    }
+                });
+
+                containers.forEach(container => observer.observe(container));
+                wrapper.pdlUcRatchet = observer;
+            },
+
+            /**
+             * Drop the height floor and stop observing. Callers invoke this while tearing a mount
+             * down, so that a re-mount — or an error message rendered where the drop-in was — does
+             * not inherit the discarded drop-in's height.
+             */
+            releaseHeightRatchet(selectionSelector) {
+                const wrapper = document.querySelector(selectionSelector)?.parentElement;
+
+                if (!wrapper || wrapper.pdlUcRatchet === undefined) {
+                    return;
+                }
+
+                wrapper.pdlUcRatchet.disconnect();
+                delete wrapper.pdlUcRatchet;
+                wrapper.style.minHeight = '';
             },
 
             showError(message) {
