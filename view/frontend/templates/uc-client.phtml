@@ -50,6 +50,15 @@
         // Ceiling on the height floor ratchetHeight() will hold, as a backstop against a
         // pathological grow-measure-grow cycle. UC's tallest screens land well under this.
         const MAX_RATCHET_PX = 1000;
+        // Rendered height at or below which the payment-selection list is taken to hold a single
+        // button. UC sizes that frame itself from its own resize message; a lone card button measured
+        // 45px against the 0.34 library, and a second button roughly doubles it. Deliberately tight:
+        // read too high and the list is simply left alone, whereas reading too low would hide real
+        // wallet buttons, so the slack all sits on the safe side.
+        const SINGLE_BUTTON_MAX_PX = 60;
+        // Polling for that list to render and stop resizing before it is measured; ~3s of headroom.
+        const SELECTION_POLL_MS = 150;
+        const SELECTION_POLL_LIMIT = 20;
         // CyberSource numeric card-type codes -> Magento type code + display brand. Must agree with
         // the server-side map in the base module's Model/Source/CardType, which remains
         // authoritative for the stored cc_type.
@@ -240,6 +249,11 @@
              * the captured transient-token JWT.
              */
             mountUnifiedPayments(captureContext, selectionSelector, screenSelector) {
+                // Marks this mount as the current one. skipLoneCardButton() watches the DOM on a
+                // timer, so a teardown and re-mount inside its polling window would otherwise let
+                // the superseded watcher swap in a screen built from a spent capture context.
+                const generation = this._mountSeq = (this._mountSeq || 0) + 1;
+
                 // Idempotent, and armed before the mount so the very first screen sets the floor.
                 this.ratchetHeight(selectionSelector, screenSelector);
 
@@ -249,13 +263,171 @@
                         return acceptInstance.unifiedPayments(false);
                     })
                     .then(unifiedPayments => {
-                        return unifiedPayments.show({
-                            containers: {
-                                paymentSelection: selectionSelector,
-                                paymentScreen: screenSelector,
-                            },
+                        // Both routes to a transient token stay live: the button list the customer
+                        // can click, and the card screen swapped in for a lone card button. Whichever
+                        // the customer completes settles first and wins; the other never settles.
+                        return Promise.race([
+                            unifiedPayments.show({
+                                containers: {
+                                    paymentSelection: selectionSelector,
+                                    paymentScreen: screenSelector,
+                                },
+                            }),
+                            this.skipLoneCardButton(
+                                unifiedPayments,
+                                captureContext,
+                                selectionSelector,
+                                screenSelector,
+                                generation
+                            ),
+                        ]);
+                    });
+            },
+
+            /**
+             * Replace a payment-selection list that turned out to hold a single card button with the
+             * card entry screen it would have opened.
+             *
+             * UC renders its button list even when only PANENTRY is allowed, so a card-only merchant
+             * makes every customer click "Pay with card" before they can type anything.
+             * createTrigger('PANENTRY') opens that same screen directly — it runs against the live
+             * unifiedPayments instance and its already-initialized card-entry frame, so this is a
+             * swap, not a re-mount: no teardown and no second capture context.
+             *
+             * Deciding after the mount rather than before is what makes it safe. The button list is
+             * the only thing that knows which wallets a device can actually offer, so its rendered
+             * height is the one honest signal for "there is nothing here but a card button".
+             *
+             * Resolves ONLY when the swap happens AND the customer completes card entry. Every other
+             * outcome leaves it pending forever, so the caller racing this against show() is left
+             * with exactly the behavior it had before.
+             */
+            skipLoneCardButton(
+                unifiedPayments,
+                captureContext,
+                selectionSelector,
+                screenSelector,
+                generation
+            ) {
+                return new Promise(resolve => {
+                    if (!this.isCardEntryAllowed(captureContext)) {
+                        return;
+                    }
+
+                    this.whenSelectionSettled(selectionSelector, height => {
+                        // A newer mount owns these containers now; this instance and its context
+                        // are dead.
+                        if (generation !== this._mountSeq || height > SINGLE_BUTTON_MAX_PX) {
+                            return;
+                        }
+
+                        const selection = document.querySelector(selectionSelector);
+                        let trigger;
+
+                        try {
+                            trigger = unifiedPayments.createTrigger(
+                                'PANENTRY',
+                                {containers: {paymentScreen: screenSelector}}
+                            );
+                        } catch (error) {
+                            // Older libraries have no trigger, and it throws outright when the payment
+                            // type was not requested. Either way the button list stands as-is.
+                            return;
+                        }
+
+                        // The trigger does not hide the list itself — UC's own button handler does
+                        // that separately — so a stale "Pay with card" would otherwise sit above the
+                        // open form.
+                        selection.style.display = 'none';
+                        this.restoreSelectionOnDismissal(selectionSelector, screenSelector);
+
+                        trigger.show().then(resolve, () => {
+                            selection.style.display = '';
                         });
                     });
+                });
+            },
+
+            /**
+             * Whether the capture context allows manual card entry, which createTrigger('PANENTRY')
+             * requires and throws without. Never throws — an undecodable context reads as "no".
+             */
+            isCardEntryAllowed(captureContext) {
+                try {
+                    const types = this.decodeJwtBody(captureContext).ctx[0].data.allowedPaymentTypes;
+
+                    return Array.isArray(types) && types.includes('PANENTRY');
+                } catch (error) {
+                    return false;
+                }
+            },
+
+            /**
+             * Invoke onSettled with the rendered height of the payment-selection frame, once it has
+             * stopped changing.
+             *
+             * UC paints the list and then resizes it to fit, so the first non-zero height read can be
+             * an intermediate one — hence waiting for two consecutive equal readings rather than the
+             * first. Gives up silently if it never settles, leaving the button list untouched.
+             */
+            whenSelectionSettled(selectionSelector, onSettled) {
+                let attempts = 0;
+                let previous = null;
+                const poll = () => {
+                    const frame = document.querySelector(selectionSelector + ' iframe');
+                    const height = frame ? frame.offsetHeight : 0;
+
+                    if (height > 0 && height === previous) {
+                        onSettled(height);
+
+                        return;
+                    }
+
+                    previous = height;
+                    attempts++;
+
+                    if (attempts < SELECTION_POLL_LIMIT) {
+                        setTimeout(poll, SELECTION_POLL_MS);
+                    }
+                };
+
+                setTimeout(poll, SELECTION_POLL_MS);
+            },
+
+            /**
+             * Bring the hidden button list back if the swapped-in card screen is dismissed.
+             *
+             * The card screen carries its own back control, which tears its frame out of the screen
+             * container. With the list hidden that would leave the customer facing nothing at all, and
+             * the page's mount-health check would eventually spend a fresh capture context re-mounting
+             * — counting the empty container as a mount failure while doing it. Restoring the list is
+             * both cheaper and what the back control is meant to do: the live instance still has its
+             * own button handler wired, so clicking through again resolves the raced show() promise.
+             */
+            restoreSelectionOnDismissal(selectionSelector, screenSelector) {
+                const screen = document.querySelector(screenSelector);
+                const selection = document.querySelector(selectionSelector);
+                const wrapper = selection ? selection.parentElement : null;
+
+                if (typeof window.MutationObserver !== 'function'
+                    || screen === null
+                    || wrapper === null
+                    || wrapper.pdlUcRestore !== undefined) {
+                    return;
+                }
+
+                const observer = new window.MutationObserver(() => {
+                    if (screen.children.length > 0) {
+                        return;
+                    }
+
+                    observer.disconnect();
+                    delete wrapper.pdlUcRestore;
+                    selection.style.display = '';
+                });
+
+                observer.observe(screen, {childList: true});
+                wrapper.pdlUcRestore = observer;
             },
 
             /**
@@ -309,20 +481,33 @@
             },
 
             /**
-             * Drop the height floor and stop observing. Callers invoke this while tearing a mount
-             * down, so that a re-mount — or an error message rendered where the drop-in was — does
-             * not inherit the discarded drop-in's height.
+             * Drop the height floor, stop observing, and unhide the selection container. Callers
+             * invoke this while tearing a mount down, so that a re-mount — or an error message
+             * rendered where the drop-in was — inherits neither the discarded drop-in's height nor
+             * its hidden button list.
              */
-            releaseHeightRatchet(selectionSelector) {
-                const wrapper = document.querySelector(selectionSelector)?.parentElement;
+            releaseMountObservers(selectionSelector) {
+                const selection = document.querySelector(selectionSelector);
+                const wrapper = selection?.parentElement;
 
-                if (!wrapper || wrapper.pdlUcRatchet === undefined) {
+                if (selection) {
+                    selection.style.display = '';
+                }
+
+                if (!wrapper) {
                     return;
                 }
 
-                wrapper.pdlUcRatchet.disconnect();
-                delete wrapper.pdlUcRatchet;
-                wrapper.style.minHeight = '';
+                if (wrapper.pdlUcRatchet !== undefined) {
+                    wrapper.pdlUcRatchet.disconnect();
+                    delete wrapper.pdlUcRatchet;
+                    wrapper.style.minHeight = '';
+                }
+
+                if (wrapper.pdlUcRestore !== undefined) {
+                    wrapper.pdlUcRestore.disconnect();
+                    delete wrapper.pdlUcRestore;
+                }
             },
 
             showError(message) {
