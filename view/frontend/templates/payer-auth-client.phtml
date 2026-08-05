@@ -25,8 +25,11 @@
  * view/base/web/js/payer-auth-client.js. Owns the browser primitives only (profiling, DDC,
  * challenge, transport); the checkout component sequences them and owns all UX.
  *
- * The DDC/challenge machinery matches that module line-for-line; only the transport differs
- * (fetch against the webapi routes, addressed by config.payerAuthEndpoint). postMessage
+ * The DDC/challenge machinery matches that module line-for-line; the transport differs (fetch
+ * against the webapi routes, addressed by config.payerAuthEndpoint) and so does the challenge
+ * modal's styling: the base module puts its rules in view/base/web/css/source/_module.less, and
+ * this one carries Tailwind utilities on the same pl-payerauth-* elements, purged out of this
+ * template by view/frontend/tailwind/tailwind.config.js. Keep the two in step. postMessage
  * discipline mirrors Controller/Payerauth/Challenge: every message carries source
  * 'pl-cybersource-payerauth', and wrapper messages are checked for BOTH same-origin and
  * sender-window identity; the third-party DDC collector gets the window-identity check only.
@@ -62,11 +65,27 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
         // Ceiling on an issuer challenge. EMV 3DS gives the cardholder ten minutes; past that the
         // ACS itself has abandoned the transaction, so there is nothing left to wait for.
         const CHALLENGE_TIMEOUT_MS = 600000;
-        // Minimum challenge viewport. The 3DS2 challenge window sizes are 250x400 up to 500x600
-        // plus a full-page option; sizing to the largest fixed size that still fits a small laptop
-        // keeps every issuer layout scrollable-at-worst rather than clipped.
-        const CHALLENGE_MIN_WIDTH_PX = 400;
-        const CHALLENGE_MIN_HEIGHT_PX = 500;
+        // Challenge modal styling. Utilities rather than inline declarations, so the pl-payerauth-*
+        // classes beside them are real hooks: an inline style beats any rule short of !important,
+        // which would leave a merchant no way to restyle the 3DS modal but to override this file.
+        // The class strings are literal on purpose — the module's tailwind config purges this
+        // template, and a composed string would not survive that. The base module's counterpart
+        // rules live in view/base/web/css/source/_module.less; keep the two in step.
+        //
+        // Sizing follows the EMV 3DS2 challenge window sizes, which run from 250x400 up through
+        // 500x600 plus a full-page option. h-[550px] is the 500px frame plus the header, the
+        // largest fixed size that still fits a small laptop, so every issuer layout ends up
+        // scrollable at worst rather than clipped.
+        const OVERLAY_CLASS = 'pl-payerauth-overlay fixed inset-0 z-[1000] flex items-center'
+            + ' justify-center p-2.5 bg-black/50';
+        const MODAL_CLASS = 'pl-payerauth-modal relative flex flex-col w-[400px] max-w-full'
+            + ' h-[550px] max-h-full bg-white rounded-[3px] shadow-[0_3px_12px_rgba(0,0,0,0.35)]';
+        const HEADER_CLASS = 'pl-payerauth-header flex items-center justify-between px-[15px]'
+            + ' py-2.5 border-b border-gray-200';
+        const TITLE_CLASS = 'pl-payerauth-title m-0 text-base leading-tight';
+        const CLOSE_CLASS = 'action-close pl-payerauth-close bg-transparent border-0 text-xl'
+            + ' leading-none cursor-pointer px-1';
+        const FRAME_CLASS = 'pl-payerauth-frame block border-0 w-full flex-auto min-h-[500px]';
         // Frame/element id counter, so overlapping attempts (a retry begun before the previous
         // frame is reaped) can never collide on a window name — a form target resolves by name,
         // and a duplicate would post the CReq or the JWT into the wrong frame.
@@ -306,6 +325,9 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
                     frame.setAttribute('height', '0');
                     frame.setAttribute('frameborder', '0');
                     frame.setAttribute('aria-hidden', 'true');
+                    // Stays inline, unlike the challenge modal's classes: this is concealment, not
+                    // theming, and a stylesheet that has not applied yet would flash the collector
+                    // iframe onto the checkout. Nothing here is a merchant-facing surface.
                     frame.style.position = 'absolute';
                     frame.style.left = '-9999px';
                     frame.style.top = '0';
@@ -453,32 +475,22 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
                         }
                     }
 
-                    overlay.setAttribute('class', 'pl-payerauth-overlay');
-                    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:1000;'
-                        + 'background:rgba(0,0,0,0.5);display:flex;align-items:center;'
-                        + 'justify-content:center;padding:10px;';
+                    overlay.setAttribute('class', OVERLAY_CLASS);
 
-                    dialog.setAttribute('class', 'pl-payerauth-modal');
+                    dialog.setAttribute('class', MODAL_CLASS);
                     dialog.setAttribute('role', 'dialog');
                     dialog.setAttribute('aria-modal', 'true');
                     dialog.setAttribute('aria-labelledby', headingId);
-                    dialog.style.cssText = 'position:relative;background:#fff;border-radius:3px;'
-                        + 'box-shadow:0 3px 12px rgba(0,0,0,0.35);display:flex;flex-direction:column;'
-                        + 'width:' + CHALLENGE_MIN_WIDTH_PX + 'px;max-width:100%;'
-                        + 'height:' + (CHALLENGE_MIN_HEIGHT_PX + 50) + 'px;max-height:100%;';
 
-                    header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;'
-                        + 'padding:10px 15px;border-bottom:1px solid #e8e8e8;';
+                    header.setAttribute('class', HEADER_CLASS);
 
                     heading.setAttribute('id', headingId);
-                    heading.style.cssText = 'margin:0;font-size:16px;line-height:1.2;';
+                    heading.setAttribute('class', TITLE_CLASS);
                     heading.appendChild(document.createTextNode('<?= /* @noEscape */ $tVerifyHeading ?>'));
 
                     close.setAttribute('type', 'button');
-                    close.setAttribute('class', 'action-close');
+                    close.setAttribute('class', CLOSE_CLASS);
                     close.setAttribute('aria-label', '<?= /* @noEscape */ $tCancelLabel ?>');
-                    close.style.cssText = 'background:none;border:0;font-size:20px;line-height:1;'
-                        + 'cursor:pointer;padding:0 4px;';
                     close.appendChild(document.createTextNode('×'));
                     close.addEventListener('click', function () {
                         settle('cancelled');
@@ -486,10 +498,9 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
 
                     frame.setAttribute('id', name);
                     frame.setAttribute('name', name);
+                    frame.setAttribute('class', FRAME_CLASS);
                     frame.setAttribute('title', '<?= /* @noEscape */ $tFrameTitle ?>');
                     frame.setAttribute('frameborder', '0');
-                    frame.style.cssText = 'display:block;border:0;width:100%;flex:1 1 auto;'
-                        + 'min-height:' + CHALLENGE_MIN_HEIGHT_PX + 'px;';
 
                     header.appendChild(heading);
                     header.appendChild(close);
