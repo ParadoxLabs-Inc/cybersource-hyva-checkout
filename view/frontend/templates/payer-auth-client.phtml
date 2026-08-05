@@ -362,10 +362,11 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
              * or times out.
              *
              * The modal frames OUR OWN same-origin wrapper page (challengeUrl —
-             * pdl_cybs/payerauth/challenge, server-rendered into config), never the ACS directly:
-             * the wrapper receives acsUrl and pareq by postMessage — keeping both out of any URL,
-             * history entry, or access log — POSTs the CReq into its own child frame, and relays
-             * the return event back up. This is why nothing here talks to the issuer at all.
+             * pdl_cybs/payerauth/challenge, server-rendered into config), never Cardinal or the
+             * ACS directly: the wrapper receives stepUpUrl and the step-up JWT by postMessage —
+             * keeping both out of any URL, history entry, or access log — POSTs the JWT into
+             * Cardinal's step-up frame as its own child, and relays the return event back up.
+             * Cardinal's frame runs the CReq/CRes exchange with the issuer; nothing here does.
              *
              * Both messages from the wrapper are checked for same-origin AND for coming from the
              * frame we created. A hostile same-origin frame could at most forge 'return' early,
@@ -385,10 +386,10 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
              * @return {{promise: Promise<Object>, cancel: Function}} promise resolves
              *         {status: 'return'|'cancelled'|'timeout'|'error'}
              */
-            runChallenge(challengeUrl, acsUrl, pareq) {
+            runChallenge(challengeUrl, stepUpUrl, accessToken) {
                 if (typeof challengeUrl !== 'string' || challengeUrl === ''
-                    || typeof acsUrl !== 'string' || acsUrl === ''
-                    || typeof pareq !== 'string' || pareq === '') {
+                    || typeof stepUpUrl !== 'string' || stepUpUrl === ''
+                    || typeof accessToken !== 'string' || accessToken === '') {
                     return {promise: Promise.resolve({status: 'error'}), cancel: function () {}};
                 }
 
@@ -458,7 +459,7 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
                         if (data.event === 'ready' && !started) {
                             started = true;
                             frame.contentWindow.postMessage(
-                                {source: TAG, event: 'challenge', acsUrl: acsUrl, pareq: pareq},
+                                {source: TAG, event: 'challenge', stepUpUrl: stepUpUrl, jwt: accessToken},
                                 origin
                             );
                         } else if (data.event === 'return') {
