@@ -21,23 +21,17 @@
  */
 
 /**
- * Shared Payer Authentication (3-D Secure 2) client for Hyva pages.
+ * Shared Payer Authentication (3DS2) client for Hyva pages — counterpart of the base module's
+ * view/base/web/js/payer-auth-client.js. Owns the browser primitives only (profiling, DDC,
+ * challenge, transport); the checkout component sequences them and owns all UX.
  *
- * Hyva counterpart of the base module's view/base/web/js/payer-auth-client.js AMD module. Owns the
- * four browser-side primitives the three-step server contract needs — browser profiling, device
- * data collection, the issuer challenge, and the REST transport — and nothing else: no retries, no
- * messaging, no state. The caller (the checkout Alpine component) sequences them and owns all UX.
+ * The DDC/challenge machinery matches that module line-for-line; only the transport differs
+ * (fetch against the webapi routes, addressed by config.payerAuthEndpoint). postMessage
+ * discipline mirrors Controller/Payerauth/Challenge: every message carries source
+ * 'pl-cybersource-payerauth', and wrapper messages are checked for BOTH same-origin and
+ * sender-window identity; the third-party DDC collector gets the window-identity check only.
  *
- * Per that module's own port contract, the DDC and challenge machinery is plain DOM and lifts
- * as-is; only the transport differs — fetch() against the webapi routes, addressed by the
- * server-rendered endpoint prefix (config.payerAuthEndpoint) instead of Luma's url-builder/quote
- * models. postMessage discipline mirrors the wrapper page (Controller/Payerauth/Challenge): every
- * message both ways carries source: 'pl-cybersource-payerauth', and every message from the wrapper
- * is checked for BOTH same-origin and identity of the sending window. The DDC collector is
- * third-party and gets the weaker window-identity check only — see runDdc.
- *
- * Included via $block->fetchView() from the consuming templates; the window guard makes double
- * inclusion harmless.
+ * Included via $block->fetchView(); the window guard makes double inclusion harmless.
  */
 
 use Magento\Framework\Escaper;
@@ -135,16 +129,15 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
          * POST a payload to one of the three payer-auth webapi endpoints.
          *
          * endpointBase is the server-rendered route prefix ending in '/payer-auth/' (carts/mine
-         * for a logged-in customer, guest-carts/<maskedId> for a guest — the block resolves
-         * which). same-origin credentials carry the customer session for the carts/mine `self`
-         * resource, matching how Luma's mage/storage calls authenticate.
+         * or guest-carts/<maskedId>; the block resolves which). same-origin credentials carry
+         * the customer session for the carts/mine `self` resource.
          *
          * @return {Promise<Object>} resolves with the parsed response; rejects with an Error
          */
         async function post(endpointBase, action, payload) {
             if (typeof endpointBase !== 'string' || endpointBase === '') {
-                // No addressable cart was available at render (config.payerAuthEndpoint null);
-                // fail the sequence visibly rather than skipping authentication.
+                // No addressable cart at render (payerAuthEndpoint null): fail visibly, never
+                // skip authentication.
                 throw new Error('<?= /* @noEscape */ $tUnavailable ?>');
             }
 

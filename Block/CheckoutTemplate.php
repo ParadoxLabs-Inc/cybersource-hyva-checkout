@@ -61,9 +61,8 @@ class CheckoutTemplate extends Template
     }
 
     /**
-     * Get payment form config object: Unified Checkout keys from the shared checkout provider,
-     * plus the Hyva-only transport keys the payer-auth client needs (the shared provider stays
-     * storefront-agnostic; Luma derives these from its own url-builder/quote models instead).
+     * Get payment form config: shared checkout-provider keys plus the Hyva-only payer-auth
+     * transport keys (the shared provider stays storefront-agnostic).
      */
     public function getConfig(): array
     {
@@ -77,17 +76,12 @@ class CheckoutTemplate extends Template
     }
 
     /**
-     * Get the payer-auth REST endpoint prefix for the current session, ending in '/payer-auth/';
-     * the client appends the action (setup|authenticate|finalize).
+     * Get the payer-auth REST endpoint prefix, ending in '/payer-auth/'; the client appends the
+     * action (setup|authenticate|finalize).
      *
-     * Store-code-qualified so a multi-store checkout signs against the store it renders under.
-     * Cart resolution mirrors core checkout (DefaultConfigProvider::getQuoteData): a logged-in
-     * customer addresses carts/mine (the cart comes from the session), a guest addresses
-     * guest-carts by the masked id LOADED for the session quote — never created here; a guest
-     * cart that reached checkout has one, and Luma guests carry the identical dependency.
-     *
-     * Null when there is no addressable cart (no quote, or a guest quote with no mask row);
-     * the client then fails the sequence visibly rather than skipping authentication.
+     * Store-code-qualified for multi-store. Guests address guest-carts by the masked id LOADED
+     * for the session quote — never created here, mirroring core DefaultConfigProvider. Null
+     * when there is no addressable cart; the client then fails visibly instead of skipping auth.
      */
     protected function getPayerAuthEndpoint(): ?string
     {
@@ -116,8 +110,8 @@ class CheckoutTemplate extends Template
 
             return $restBase . '/guest-carts/' . $maskedId . '/paradoxlabs-cybersource/payer-auth/';
         } catch (Throwable) {
-            // No usable session/store context (e.g. layout rendered outside checkout); the
-            // config key stays null and the client reports authentication unavailable.
+            // No usable session/store context (rendered outside checkout); null fails visibly
+            // client-side.
             return null;
         }
     }

@@ -148,8 +148,7 @@ class CyberSourceTest extends TestCase
             ->willReturn($validation);
 
         // No failure result: the client validator narrates every rejection itself, and a
-        // cancelled payer-auth challenge must stay silent. A generic message here would
-        // double-message and mislabel the cancel (adversarial review finding #1).
+        // cancelled 3DS challenge must stay silent — a generic message would double-message both.
         $validation->expects($this->never())
             ->method('withFailureResult');
 

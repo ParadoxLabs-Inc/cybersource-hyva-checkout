@@ -174,11 +174,9 @@ class CyberSource extends Form implements EvaluationInterface
     /**
      * Determine whether checkout completion is allowed.
      *
-     * Deliberately NO withFailureResult(): every rejection path in the client validator
-     * (prepareSubmit) narrates its own specific message — CVV, incomplete form, total drift,
-     * payer-auth decline/timeout/error — and a payer-auth challenge the customer deliberately
-     * cancels must re-enable checkout SILENTLY. A generic failure result here would double-
-     * message every one of those and mislabel the silent-cancel as a payment-details problem.
+     * Deliberately NO withFailureResult(): every prepareSubmit rejection narrates its own
+     * message client-side, and a deliberately cancelled 3DS challenge must re-enable checkout
+     * silently — a generic failure result would double-message both.
      */
     public function evaluateCompletion(EvaluationResultFactory $factory): EvaluationResultInterface
     {
