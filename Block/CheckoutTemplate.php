@@ -21,11 +21,15 @@
 
 namespace ParadoxLabs\CyberSourceHyvaCheckout\Block;
 
+use Magento\Checkout\Model\Session as CheckoutSession;
+use Magento\Framework\UrlInterface;
 use Magento\Framework\View\Element\Template;
 use Magento\Framework\View\Element\Template\Context;
+use Magento\Quote\Model\QuoteIdMaskFactory;
 use ParadoxLabs\CyberSource\Model\Config\CheckoutProvider;
 use ParadoxLabs\CyberSource\Model\Config\Config;
 use ParadoxLabs\CyberSourceHyvaCheckout\ViewModel\PaymentForm;
+use Throwable;
 
 class CheckoutTemplate extends Template
 {
@@ -33,12 +37,16 @@ class CheckoutTemplate extends Template
      * @param \Magento\Framework\View\Element\Template\Context $context
      * @param \ParadoxLabs\CyberSourceHyvaCheckout\ViewModel\PaymentForm $paymentForm
      * @param \ParadoxLabs\CyberSource\Model\Config\CheckoutProvider $configProvider
+     * @param \Magento\Checkout\Model\Session $checkoutSession
+     * @param \Magento\Quote\Model\QuoteIdMaskFactory $quoteIdMaskFactory
      * @param array $data
      */
     public function __construct(
         Context $context,
         protected PaymentForm $paymentForm,
         protected CheckoutProvider $configProvider,
+        protected CheckoutSession $checkoutSession,
+        protected QuoteIdMaskFactory $quoteIdMaskFactory,
         array $data = [],
     ) {
         parent::__construct($context, $data);
@@ -53,12 +61,64 @@ class CheckoutTemplate extends Template
     }
 
     /**
-     * Get payment form config object (Unified Checkout keys from the shared checkout provider)
+     * Get payment form config object: Unified Checkout keys from the shared checkout provider,
+     * plus the Hyva-only transport keys the payer-auth client needs (the shared provider stays
+     * storefront-agnostic; Luma derives these from its own url-builder/quote models instead).
      */
     public function getConfig(): array
     {
         $config = $this->configProvider->getConfig();
+        $config = $config['payment'][ $this->getMethodCode() ] ?? [];
 
-        return $config['payment'][ $this->getMethodCode() ] ?? [];
+        $config['payerAuthEndpoint'] = $this->getPayerAuthEndpoint();
+        $config['payerAuthChallengeUrl'] = $this->getUrl('pdl_cybs/payerauth/challenge');
+
+        return $config;
+    }
+
+    /**
+     * Get the payer-auth REST endpoint prefix for the current session, ending in '/payer-auth/';
+     * the client appends the action (setup|authenticate|finalize).
+     *
+     * Store-code-qualified so a multi-store checkout signs against the store it renders under.
+     * Cart resolution mirrors core checkout (DefaultConfigProvider::getQuoteData): a logged-in
+     * customer addresses carts/mine (the cart comes from the session), a guest addresses
+     * guest-carts by the masked id LOADED for the session quote — never created here; a guest
+     * cart that reached checkout has one, and Luma guests carry the identical dependency.
+     *
+     * Null when there is no addressable cart (no quote, or a guest quote with no mask row);
+     * the client then fails the sequence visibly rather than skipping authentication.
+     */
+    protected function getPayerAuthEndpoint(): ?string
+    {
+        try {
+            $store = $this->_storeManager->getStore();
+            $quote = $this->checkoutSession->getQuote();
+
+            if (!$quote->getId()) {
+                return null;
+            }
+
+            $restBase = $store->getBaseUrl(UrlInterface::URL_TYPE_WEB)
+                . 'rest/' . $store->getCode() . '/V1';
+
+            if ($quote->getCustomer()->getId()) {
+                return $restBase . '/carts/mine/paradoxlabs-cybersource/payer-auth/';
+            }
+
+            $maskedId = $this->quoteIdMaskFactory->create()
+                ->load((int)$quote->getId(), 'quote_id')
+                ->getMaskedId();
+
+            if (empty($maskedId)) {
+                return null;
+            }
+
+            return $restBase . '/guest-carts/' . $maskedId . '/paradoxlabs-cybersource/payer-auth/';
+        } catch (Throwable) {
+            // No usable session/store context (e.g. layout rendered outside checkout); the
+            // config key stays null and the client reports authentication unavailable.
+            return null;
+        }
     }
 }
