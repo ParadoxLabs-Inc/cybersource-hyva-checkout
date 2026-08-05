@@ -78,7 +78,10 @@ class CheckoutTemplateTest extends TestCase
     protected function setUp(): void
     {
         $store = $this->createMock(Store::class);
+        // Pinned to URL_TYPE_WEB: URL_TYPE_LINK would double the store code into the path
+        // ('/storecode/rest/storecode/V1/...') on stores with "Add Store Code to Urls" enabled.
         $store->method('getBaseUrl')
+            ->with(UrlInterface::URL_TYPE_WEB)
             ->willReturn('https://store.example/');
         $store->method('getCode')
             ->willReturn('default');

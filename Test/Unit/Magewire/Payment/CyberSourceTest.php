@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace ParadoxLabs\CyberSourceHyvaCheckout\Test\Unit\Magewire\Payment;
 
-use Hyva\Checkout\Model\Magewire\Component\Evaluation\ErrorMessage;
 use Hyva\Checkout\Model\Magewire\Component\Evaluation\Validation;
 use Hyva\Checkout\Model\Magewire\Component\EvaluationResultFactory;
 use Magento\Checkout\Model\Session as CheckoutSession;
@@ -140,19 +139,19 @@ class CyberSourceTest extends TestCase
 
     public function testEvaluateCompletionRegistersMethodValidator(): void
     {
-        $errorMessage = $this->createMock(ErrorMessage::class);
         $validation = $this->createMock(Validation::class);
 
         $resultFactory = $this->createMock(EvaluationResultFactory::class);
-        $resultFactory->method('createErrorMessage')->willReturn($errorMessage);
         $resultFactory->expects($this->once())
             ->method('createValidation')
             ->with('validateparadoxlabs_cybersource')
             ->willReturn($validation);
 
-        $validation->expects($this->once())
-            ->method('withFailureResult')
-            ->with($errorMessage);
+        // No failure result: the client validator narrates every rejection itself, and a
+        // cancelled payer-auth challenge must stay silent. A generic message here would
+        // double-message and mislabel the cancel (adversarial review finding #1).
+        $validation->expects($this->never())
+            ->method('withFailureResult');
 
         $this->assertSame($validation, $this->component->evaluateCompletion($resultFactory));
     }

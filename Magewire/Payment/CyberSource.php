@@ -172,18 +172,17 @@ class CyberSource extends Form implements EvaluationInterface
     }
 
     /**
-     * Determine whether checkout completion is allowed
+     * Determine whether checkout completion is allowed.
+     *
+     * Deliberately NO withFailureResult(): every rejection path in the client validator
+     * (prepareSubmit) narrates its own specific message — CVV, incomplete form, total drift,
+     * payer-auth decline/timeout/error — and a payer-auth challenge the customer deliberately
+     * cancels must re-enable checkout SILENTLY. A generic failure result here would double-
+     * message every one of those and mislabel the silent-cancel as a payment-details problem.
      */
     public function evaluateCompletion(EvaluationResultFactory $factory): EvaluationResultInterface
     {
-        $validationError = $factory->createErrorMessage();
-        $validationError->withMessage('There\'s an issue with your payment details. Please check the payment form.');
-        $validationError->withVisibilityDuration(5000);
-
-        $validation = $factory->createValidation('validate' . static::METHOD_CODE);
-        $validation->withFailureResult($validationError);
-
-        return $validation;
+        return $factory->createValidation('validate' . static::METHOD_CODE);
     }
 
     /**
