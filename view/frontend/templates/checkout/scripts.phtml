@@ -36,6 +36,10 @@ $tTotalChanged   = $escaper->escapeJs(__('Your order total changed. Please re-en
 $tCompleteForm   = $escaper->escapeJs(__('Please complete the payment form.'));
 $tNewCard        = $escaper->escapeJs(__('New Card'));
 $tCardLabel      = $escaper->escapeJs(__('%1 ****%2'));
+$tPaDeclined     = $escaper->escapeJs(__('Your payment could not be verified. Please try another payment method.'));
+$tPaTimeout      = $escaper->escapeJs(__('Payment verification timed out. Please try again.'));
+$tPaError        = $escaper->escapeJs(__('Payment verification could not be completed. Please try again.'));
+$tPaUnavailable  = $escaper->escapeJs(__('Payment authentication is unavailable. Please try again.'));
 $inlineScript = <<<JS
     'use strict';
 
@@ -101,6 +105,27 @@ $inlineScript = <<<JS
             _lastSelectedCard: '',
             _abortController: null,
             _hidOrderButton: false,
+
+            // Payer authentication (3-D Secure 2) state machine. The pre-place sequence runs
+            // inside the checkout:validate validator (ensurePayerAuth); these fields drive its
+            // latch/re-entry discipline, ported from the Luma renderer.
+            //   _payerAuthCleared     - this place attempt has passed payer auth; the validator
+            //                           resolves straight through.
+            //   _payerAuthInFlight    - the sequence is running; blocks a second concurrent run
+            //                           (double-click, or auto-place racing a manual click).
+            //   _payerAuthGeneration  - stamps each sequence so a teardown (resetPayerAuthState)
+            //                           invalidates in-flight continuations; mirrors the
+            //                           mount-generation idiom used for the drop-in above.
+            //   _reverifyAttempted    - at most one automatic re-auth after a server "verify
+            //                           again" refusal, per instrument (reset on any card/token
+            //                           change).
+            //   _activeChallenge      - the in-flight runChallenge() handle, so a mid-challenge
+            //                           teardown can cancel the modal.
+            _payerAuthCleared: false,
+            _payerAuthInFlight: false,
+            _payerAuthGeneration: 0,
+            _reverifyAttempted: false,
+            _activeChallenge: null,
 
             // Expiry timers, deliberately split: a lapsed capture context only matters while the
             // customer has yet to tokenize (silent re-mount), whereas a lapsed transient token
@@ -303,6 +328,10 @@ $inlineScript = <<<JS
                     return;
                 }
 
+                // A freshly tokenized card is a new instrument; any payer-auth clearance carried
+                // over from a prior token or card must drop before it can be charged.
+                this.resetPayerAuthState();
+
                 this.transientToken = transientTokenJwt;
                 this.newCardEntered = true;
 
@@ -408,6 +437,12 @@ $inlineScript = <<<JS
                 }
 
                 this._lastSelectedCard = selected;
+
+                // The selected instrument changed for real: any payer-auth clearance belonged to
+                // the previous card/token, so drop it (and settle any in-flight sequence/
+                // challenge) before the next attempt re-authenticates the new instrument.
+                this.resetPayerAuthState();
+
                 this.updateStoredCardState();
                 this.toggleOrderButton();
 
@@ -633,6 +668,11 @@ $inlineScript = <<<JS
                 this.clearTimer('_tokenTimer');
                 this.clearTimer('_healthTimer');
 
+                // The instrument this teardown discards may carry payer-auth state: drop the
+                // clearance and cancel a challenge modal left open by the attempt being torn down
+                // (token expiry, billing change, total drift).
+                this.resetPayerAuthState();
+
                 // Invalidate any cycle still in flight: bumping the generation makes its callbacks
                 // no-ops, so a load or mount started before this teardown cannot land afterwards.
                 this._generation++;
@@ -671,10 +711,59 @@ $inlineScript = <<<JS
              * an ordinary decline never counts against MAX_MOUNT_FAILURES. Stored-card attempts have
              * no token to spend; remountDropin() is a no-op while a card is selected (guarded).
              */
-            handleOrderError: function() {
+            handleOrderError: function(event) {
+                // Server re-verify path (BindingValidator::reverify) FIRST: the order already
+                // passed CLIENT payer auth this attempt (latch set), yet the server refused
+                // because the persisted authentication no longer covers the charge (stale/
+                // incomplete/mismatched). That refusal fires BEFORE the gateway is reached, so
+                // the instrument — including a new-card transient token — is intact: re-run the
+                // payer-auth sequence once automatically, reusing the same token/card, then
+                // re-place. The remount below is deliberately skipped on this branch; remounting
+                // would discard the still-valid token and force pointless card re-entry.
+                if (this._payerAuthCleared === true
+                    && this._reverifyAttempted !== true
+                    && this.isReverifyFailure(event)) {
+                    this._reverifyAttempted = true;
+                    this._payerAuthCleared = false;
+                    this.runPayerAuthSequence().then(cleared => {
+                        if (cleared) {
+                            hyvaCheckout.order.place();
+                        }
+                    });
+
+                    return;
+                }
+
+                // Terminal failure (hard decline, or a second re-verify refusal): drop the
+                // payer-auth latch so the NEXT place re-authenticates. This must run for stored
+                // cards too — they have no token to spend, so the remount below never fires for
+                // them, and without this every retry would delegate straight to placement and be
+                // refused identically, forever.
+                this._payerAuthCleared = false;
+                this._reverifyAttempted = false;
+
                 if (this.selectedCard === NEW_CARD_ID || this.transientToken) {
                     this.remountDropin();
                 }
+            },
+
+            /**
+             * Whether a failed place event is the server's payer-auth "verify again" refusal.
+             *
+             * FRAGILE: this matches a stable substring of BindingValidator::reverify()'s message,
+             * declared server-side as BindingValidator::REVERIFY_MARKER and pinned by
+             * BindingValidatorTest so drift fails the suite rather than silently ending this
+             * retry. The event detail carries the sanitized message (PlaceOrderServiceProcessor;
+             * developer mode prefixes it, which substring matching survives). A blanket "re-auth
+             * on any failure" would be wrong here — a genuine gateway decline consumes the
+             * single-use transient token, so re-running setup against it would surface a
+             * confusing auth error instead of the real decline. If the server message changes,
+             * update it here, in the Luma renderer, and in BindingValidator.
+             */
+            isReverifyFailure: function(event) {
+                const text = event && event.detail && event.detail.text;
+
+                return typeof text === 'string' && text.indexOf('verify your payment again') !== -1;
             },
 
             prepareSubmit: async function(event) {
@@ -726,8 +815,300 @@ $inlineScript = <<<JS
                     return;
                 }
 
+                // Payer authentication (3DS2) resolves fully before placement, AFTER the cheap
+                // payload checks above so a CVV mistake or total drift never spends an auth
+                // round-trip (or a challenge) on an order that would not place.
+                if (!(await this.ensurePayerAuth())) {
+                    reject();
+
+                    return;
+                }
+
                 hyvaCheckout.storage.setValue('payment', payload);
                 resolve(true);
+            },
+
+            // --- Payer authentication (3-D Secure 2) --------------------------------------------
+
+            /**
+             * Ensure payer authentication has resolved for this attempt; the validator seat for
+             * the Luma renderer's placeOrder() override.
+             *
+             * - latch set (_payerAuthCleared) => cleared; the validator resolves straight through.
+             * - payerAuthActive === false => cleared. This is ONLY a cost optimization, so it must
+             *   fail toward running auth: gate on an EXPLICIT false, never on a missing key — a
+             *   stale config bundle or a tab opened before the merchant enabled 3DS leaves the
+             *   flag undefined, in which case we run setup and let the server answer 'skipped'
+             *   (one round-trip), rather than silently placing an unauthenticated order.
+             * - a sequence already running => blocked, so a double-submit cannot start two.
+             * - agreements unaccepted => blocked without an auth round-trip. Hyva runs all
+             *   validators concurrently (Promise.all), so the terms validator cannot be relied on
+             *   to fail first — without this check a challenge modal could be spent on an order
+             *   the terms validator was already rejecting.
+             *
+             * @return {Promise<Boolean>} whether placement may proceed
+             */
+            ensurePayerAuth: async function() {
+                if (this._payerAuthCleared === true) {
+                    return true;
+                }
+
+                if (this.config.payerAuthActive === false) {
+                    return true;
+                }
+
+                if (this._payerAuthInFlight === true) {
+                    return false;
+                }
+
+                if (!this.areAgreementsAccepted()) {
+                    return false;
+                }
+
+                return await this.runPayerAuthSequence();
+            },
+
+            /**
+             * Run the pre-place payer-authentication sequence for the current instrument:
+             * setup -> (skipped ? cleared) : DDC (best-effort) -> authenticate ->
+             * success/failed/challenge. Each step is stamped with a generation so a teardown
+             * (resetPayerAuthState — card change, remount, token expiry) mid-flight discards the
+             * continuation instead of clearing a stale attempt.
+             *
+             * On success the cleared latch is set; every terminal failure path has already
+             * narrated itself (decline/timeout/error message) by the time false comes back.
+             *
+             * @return {Promise<Boolean>} whether the attempt cleared payer authentication
+             */
+            runPayerAuthSequence: async function() {
+                const payload = this.buildPayerAuthPayload();
+
+                if (payload === null) {
+                    // No instrument to authenticate (prepareSubmit should have blocked this).
+                    return false;
+                }
+
+                const generation = ++this._payerAuthGeneration;
+                this._payerAuthInFlight = true;
+
+                try {
+                    const setupResult = await window.pdlCybsPa.setup(
+                        this.config.payerAuthEndpoint,
+                        payload
+                    );
+
+                    if (!this.isCurrentPayerAuth(generation)) {
+                        return false;
+                    }
+
+                    // PA disabled server-side / excluded type / legacy card: proceed exactly as
+                    // today, keeping PA-off behavior identical aside from the one setup call.
+                    if (setupResult && setupResult.skipped === true) {
+                        return this.completePayerAuth(generation);
+                    }
+
+                    // Device data collection is best-effort and always resolves; proceed
+                    // regardless of its outcome.
+                    await window.pdlCybsPa.runDdc(
+                        window.pdlCybsPa.getResultField(setupResult, 'accessToken', 'access_token'),
+                        window.pdlCybsPa.getResultField(
+                            setupResult,
+                            'deviceDataCollectionUrl',
+                            'device_data_collection_url'
+                        )
+                    );
+
+                    if (!this.isCurrentPayerAuth(generation)) {
+                        return false;
+                    }
+
+                    const authResult = await window.pdlCybsPa.authenticate(
+                        this.config.payerAuthEndpoint,
+                        window.pdlCybsPa.collectBrowserInfo()
+                    );
+
+                    if (!this.isCurrentPayerAuth(generation)) {
+                        return false;
+                    }
+
+                    return await this.handleAuthenticateResult(authResult, generation);
+                } catch (error) {
+                    if (!this.isCurrentPayerAuth(generation)) {
+                        return false;
+                    }
+
+                    return this.handlePayerAuthError(error);
+                }
+            },
+
+            /**
+             * Build the setup payload: exactly one of {transientToken} (new card) or {cardHash}
+             * (stored card), mirroring the additional_data contract.
+             *
+             * @return {Object|null} null when there is no instrument to authenticate
+             */
+            buildPayerAuthPayload: function() {
+                const selected = this.selectedCard;
+
+                if (selected === NEW_CARD_ID || !selected) {
+                    return this.transientToken ? {transientToken: this.transientToken} : null;
+                }
+
+                return {cardHash: selected};
+            },
+
+            /**
+             * Route an authenticate/finalize outcome: success/skipped => cleared; failed =>
+             * decline; challenge => run the issuer step-up.
+             */
+            handleAuthenticateResult: async function(result, generation) {
+                const status = result && result.status;
+
+                if (status === 'success' || status === 'skipped') {
+                    return this.completePayerAuth(generation);
+                }
+
+                if (status === 'challenge') {
+                    return await this.runChallengeFlow(result, generation);
+                }
+
+                // 'failed' or anything unexpected: hard decline. The card is not the problem
+                // shape, so the drop-in is deliberately NOT reset — the server obligation blocks
+                // placement anyway.
+                return this.declinePayerAuth();
+            },
+
+            /**
+             * Run the issuer challenge, then finalize. Holds the challenge handle so a
+             * mid-challenge teardown can cancel the modal (resetPayerAuthState).
+             */
+            runChallengeFlow: async function(authResult, generation) {
+                const challenge = window.pdlCybsPa.runChallenge(
+                    this.config.payerAuthChallengeUrl,
+                    window.pdlCybsPa.getResultField(authResult, 'acsUrl', 'acs_url'),
+                    authResult ? authResult.pareq : ''
+                );
+
+                this._activeChallenge = challenge;
+
+                const challengeResult = await challenge.promise;
+
+                if (!this.isCurrentPayerAuth(generation)) {
+                    // Superseded (e.g. a teardown cancelled the challenge): the teardown owns
+                    // cleanup.
+                    return false;
+                }
+
+                this._activeChallenge = null;
+
+                if (challengeResult.status !== 'return') {
+                    // Cancelled / timeout / frame error: re-enable checkout, no order.
+                    return this.cancelPayerAuth(challengeResult.status);
+                }
+
+                // The step-up returned; the real outcome is read server-side from CyberSource.
+                const finalizeResult = await window.pdlCybsPa.finalize(this.config.payerAuthEndpoint);
+
+                if (!this.isCurrentPayerAuth(generation)) {
+                    return false;
+                }
+
+                return await this.handleAuthenticateResult(finalizeResult, generation);
+            },
+
+            /**
+             * Whether a payer-auth continuation still belongs to the live sequence. A stale one
+             * is a continuation whose sequence was superseded or torn down (resetPayerAuthState)
+             * in flight.
+             */
+            isCurrentPayerAuth: function(generation) {
+                return generation === this._payerAuthGeneration;
+            },
+
+            /**
+             * Payer auth cleared: latch it so this attempt (and the re-place after a re-verify)
+             * resolves straight through the validator.
+             */
+            completePayerAuth: function(generation) {
+                if (!this.isCurrentPayerAuth(generation)) {
+                    return false;
+                }
+
+                this._payerAuthCleared = true;
+                this._payerAuthInFlight = false;
+
+                return true;
+            },
+
+            /**
+             * Hard decline: authentication failed outright. Surface the message WITHOUT resetting
+             * the drop-in — re-entering the same card cannot help, and the server obligation
+             * blocks placement regardless, so a retry with the same instrument stays blocked.
+             */
+            declinePayerAuth: function() {
+                this._payerAuthCleared = false;
+                this._payerAuthInFlight = false;
+                this._activeChallenge = null;
+
+                this.showError('{$tPaDeclined}');
+
+                return false;
+            },
+
+            /**
+             * Customer-driven end to the challenge (closed the modal, timed out, or a frame
+             * error). Re-enable checkout and place no order; the customer can retry. 'cancelled'
+             * is a deliberate customer action — re-enable silently, no error banner.
+             */
+            cancelPayerAuth: function(status) {
+                this._payerAuthCleared = false;
+                this._payerAuthInFlight = false;
+                this._activeChallenge = null;
+
+                if (status === 'timeout') {
+                    this.showError('{$tPaTimeout}');
+                } else if (status === 'error') {
+                    this.showError('{$tPaError}');
+                }
+
+                return false;
+            },
+
+            /**
+             * Transport/server error anywhere in the sequence. Re-enable checkout and show the
+             * message.
+             */
+            handlePayerAuthError: function(error) {
+                this._payerAuthCleared = false;
+                this._payerAuthInFlight = false;
+                this._activeChallenge = null;
+
+                this.showError(error && error.message ? error.message : '{$tPaUnavailable}');
+
+                return false;
+            },
+
+            /**
+             * Settle and forget any in-flight payer-auth sequence, dropping the cleared latch.
+             *
+             * Bumping the generation neutralizes every outstanding continuation (so a resolving
+             * setup / authenticate / finalize / challenge cannot clear a stale attempt or mutate
+             * state afterward), then the challenge modal is cancelled so a step-up open at
+             * teardown is torn down. Called on any real card/token change and from
+             * resetDropinState (remount/total-change/expiry), so the next attempt authenticates
+             * the current instrument from scratch.
+             */
+            resetPayerAuthState: function() {
+                this._payerAuthGeneration++;
+                this._payerAuthCleared = false;
+                this._payerAuthInFlight = false;
+                this._reverifyAttempted = false;
+
+                if (this._activeChallenge && typeof this._activeChallenge.cancel === 'function') {
+                    this._activeChallenge.cancel();
+                }
+
+                this._activeChallenge = null;
             },
 
             // --- Misc ----------------------------------------------------------------------------
@@ -789,6 +1170,9 @@ JS;
 ?>
 <?= /* @noEscape */ $block->fetchView(
     $block->getTemplateFile('ParadoxLabs_CyberSourceHyvaCheckout::uc-client.phtml')
+) ?>
+<?= /* @noEscape */ $block->fetchView(
+    $block->getTemplateFile('ParadoxLabs_CyberSourceHyvaCheckout::payer-auth-client.phtml')
 ) ?>
 <script><?= /* @noEscape */
     $inlineScript ?></script>
