@@ -958,8 +958,12 @@ $inlineScript = <<<JS
             runChallengeFlow: async function(authResult, generation) {
                 const challenge = window.pdlCybsPa.runChallenge(
                     this.config.payerAuthChallengeUrl,
-                    window.pdlCybsPa.getResultField(authResult, 'stepUpUrl', 'step_up_url'),
-                    window.pdlCybsPa.getResultField(authResult, 'accessToken', 'access_token')
+                    {
+                        stepUpUrl: window.pdlCybsPa.getResultField(authResult, 'stepUpUrl', 'step_up_url'),
+                        accessToken: window.pdlCybsPa.getResultField(authResult, 'accessToken', 'access_token'),
+                        acsUrl: window.pdlCybsPa.getResultField(authResult, 'acsUrl', 'acs_url'),
+                        pareq: authResult ? authResult.pareq : ''
+                    }
                 );
 
                 this._activeChallenge = challenge;

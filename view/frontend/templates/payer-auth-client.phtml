@@ -363,10 +363,12 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
              *
              * The modal frames OUR OWN same-origin wrapper page (challengeUrl —
              * pdl_cybs/payerauth/challenge, server-rendered into config), never Cardinal or the
-             * ACS directly: the wrapper receives stepUpUrl and the step-up JWT by postMessage —
-             * keeping both out of any URL, history entry, or access log — POSTs the JWT into
-             * Cardinal's step-up frame as its own child, and relays the return event back up.
-             * Cardinal's frame runs the CReq/CRes exchange with the issuer; nothing here does.
+             * ACS directly: the wrapper receives the challenge handles by postMessage — keeping
+             * them out of any URL, history entry, or access log — starts the challenge in its own
+             * child frame, and relays the completion event back up. The result may carry either or
+             * both transports; the wrapper prefers the Cardinal-hosted step-up (stepUpUrl + JWT)
+             * and falls back to the raw EMV shape (creq=<pareq> to the issuer ACS) that
+             * Direct-API-shaped accounts return.
              *
              * Both messages from the wrapper are checked for same-origin AND for coming from the
              * frame we created. A hostile same-origin frame could at most forge 'return' early,
@@ -383,13 +385,22 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
              * promise as 'cancelled' and reaps the modal; it is a no-op once the challenge has
              * already settled.
              *
+             * @param {String} challengeUrl - the same-origin wrapper page URL
+             * @param {Object} handles - challenge handles from the authenticate/finalize result:
+             *        {stepUpUrl, accessToken, acsUrl, pareq}; either complete pair is sufficient
              * @return {{promise: Promise<Object>, cancel: Function}} promise resolves
              *         {status: 'return'|'cancelled'|'timeout'|'error'}
              */
-            runChallenge(challengeUrl, stepUpUrl, accessToken) {
+            runChallenge(challengeUrl, handles) {
+                const stepUpUrl = handles && typeof handles.stepUpUrl === 'string' ? handles.stepUpUrl : '';
+                const accessToken = handles && typeof handles.accessToken === 'string' ? handles.accessToken : '';
+                const acsUrl = handles && typeof handles.acsUrl === 'string' ? handles.acsUrl : '';
+                const pareq = handles && typeof handles.pareq === 'string' ? handles.pareq : '';
+                const stepUpUsable = stepUpUrl !== '' && accessToken !== '';
+                const rawUsable = acsUrl !== '' && pareq !== '';
+
                 if (typeof challengeUrl !== 'string' || challengeUrl === ''
-                    || typeof stepUpUrl !== 'string' || stepUpUrl === ''
-                    || typeof accessToken !== 'string' || accessToken === '') {
+                    || (!stepUpUsable && !rawUsable)) {
                     return {promise: Promise.resolve({status: 'error'}), cancel: function () {}};
                 }
 
@@ -459,7 +470,14 @@ $tFrameTitle    = $escaper->escapeJs(__('Payment Authentication'));
                         if (data.event === 'ready' && !started) {
                             started = true;
                             frame.contentWindow.postMessage(
-                                {source: TAG, event: 'challenge', stepUpUrl: stepUpUrl, jwt: accessToken},
+                                {
+                                    source: TAG,
+                                    event: 'challenge',
+                                    stepUpUrl: stepUpUrl,
+                                    jwt: accessToken,
+                                    acsUrl: acsUrl,
+                                    pareq: pareq
+                                },
                                 origin
                             );
                         } else if (data.event === 'return') {
