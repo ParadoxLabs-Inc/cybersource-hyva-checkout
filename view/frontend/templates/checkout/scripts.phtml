@@ -714,7 +714,18 @@ $inlineScript = <<<JS
                     && this.isReverifyFailure(event)) {
                     this._reverifyAttempted = true;
                     this._payerAuthCleared = false;
+
+                    // Hold the checkout loader for the WHOLE re-verify: the failed place has
+                    // already released its own loader, so without this the page — Place Order
+                    // included — looks idle while 3DS is still running, and clicks die silently
+                    // against _payerAuthInFlight. The challenge modal sits above the loader
+                    // overlay (z-[1000] vs z-50), so a step-up stays interactive. Released
+                    // BEFORE the re-place so hyvaCheckout.order.place() owns its own loader
+                    // lifecycle; runPayerAuthSequence() never rejects, so then() always runs.
+                    hyvaCheckout.loader.start();
                     this.runPayerAuthSequence().then(cleared => {
+                        hyvaCheckout.loader.stop();
+
                         if (cleared) {
                             hyvaCheckout.order.place();
                         }
