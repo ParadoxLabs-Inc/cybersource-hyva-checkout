@@ -66,7 +66,7 @@ $image = $formBlock->getBrandingImage();
                 </option>
             </template>
             <template x-if="newCardEntered">
-                <option value="unified_checkout_new"><?= $escaper->escapeHtml(__('New Card')) ?></option>
+                <option value="unified_checkout_new" x-text="getNewCardLabel()"></option>
             </template>
             <option value=""><?= $escaper->escapeHtml(__('Add new card')) ?></option>
         </select>

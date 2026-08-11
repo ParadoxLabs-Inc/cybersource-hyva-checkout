@@ -172,18 +172,15 @@ class CyberSource extends Form implements EvaluationInterface
     }
 
     /**
-     * Determine whether checkout completion is allowed
+     * Determine whether checkout completion is allowed.
+     *
+     * Deliberately NO withFailureResult(): every prepareSubmit rejection narrates its own
+     * message client-side, and a deliberately cancelled 3DS challenge must re-enable checkout
+     * silently — a generic failure result would double-message both.
      */
     public function evaluateCompletion(EvaluationResultFactory $factory): EvaluationResultInterface
     {
-        $validationError = $factory->createErrorMessage();
-        $validationError->withMessage('There\'s an issue with your payment details. Please check the payment form.');
-        $validationError->withVisibilityDuration(5000);
-
-        $validation = $factory->createValidation('validate' . static::METHOD_CODE);
-        $validation->withFailureResult($validationError);
-
-        return $validation;
+        return $factory->createValidation('validate' . static::METHOD_CODE);
     }
 
     /**
