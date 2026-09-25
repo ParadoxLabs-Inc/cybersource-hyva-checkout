@@ -1,5 +1,11 @@
 # ParadoxLabs_CyberSourceHyvaCheckout Changelog
 
+## 1.0.1 - Unreleased
+
+- Fixed capture-context total drift detection never firing on Hyvä Checkout. Magewire does not return component
+  method results to the browser, so the mount and submit totals always read as null; the total is now delivered via
+  a browser event, and a new card entered before a total change (coupon, shipping) is re-collected as intended.
+
 ## 1.0.0 - Aug 11, 2026
 
 Initial release: CyberSource Unified Checkout support for Hyvä Checkout, built on `paradoxlabs/cybersource` 4.0.

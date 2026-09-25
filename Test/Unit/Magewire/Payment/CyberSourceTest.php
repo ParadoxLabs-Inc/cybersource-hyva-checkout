@@ -137,6 +137,31 @@ class CyberSourceTest extends TestCase
         $this->assertSame([], $this->component->storedCards);
     }
 
+    /**
+     * Magewire 1.x discards method return values, so the browser can only receive the quote
+     * total through a dispatched browser event.
+     */
+    public function testLoadQuoteTotalDispatchesFormattedTotalAsBrowserEvent(): void
+    {
+        $this->quote->method('getData')->willReturnMap([
+            ['base_grand_total', null, 30.5],
+        ]);
+
+        $this->component->loadQuoteTotal();
+
+        $this->assertSame(
+            [
+                [
+                    'event' => 'paradoxlabs_cybersourceQuoteTotal',
+                    'data' => [
+                        'total' => '30.5000',
+                    ],
+                ],
+            ],
+            $this->component->getBrowserEvents()
+        );
+    }
+
     public function testEvaluateCompletionRegistersMethodValidator(): void
     {
         $validation = $this->createMock(Validation::class);

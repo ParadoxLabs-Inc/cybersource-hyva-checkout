@@ -88,6 +88,7 @@ $inlineScript = <<<JS
             ccCid: '',
             loading: false,
             mountTotal: null,
+            _quoteTotal: null,
             componentInitialized: false,
             config: {},
             state: {
@@ -142,6 +143,7 @@ $inlineScript = <<<JS
 
                 window.addEventListener('checkout:validate:{$code}', this.prepareSubmit.bind(this));
                 window.addEventListener('{$code}BillingUpdated', this.handleBillingUpdated.bind(this));
+                window.addEventListener('{$code}QuoteTotal', this.handleQuoteTotal.bind(this));
                 // Hyva dispatches this on window (init-payment.phtml); a document listener never fires.
                 window.addEventListener('checkout:payment:method-activate', this.handleMethodActivate.bind(this));
                 // Dispatched by the Hyva place-order service processor on any placement failure; a
@@ -209,7 +211,7 @@ $inlineScript = <<<JS
 
                 // Record the total the capture mandate is minted against, for drift detection at
                 // submit. Fire-and-forget alongside the context request; guarded by generation.
-                this.\$wire.call('getQuoteTotal').then(total => {
+                this.fetchQuoteTotal().then(total => {
                     if (this.isCurrentGeneration(generation)) {
                         this.mountTotal = total;
                     }
@@ -261,6 +263,21 @@ $inlineScript = <<<JS
                 });
             },
 
+            /**
+             * Fetch the current quote base grand total from the component.
+             *
+             * Magewire 1.x discards method return values, so the component pushes the total via
+             * the QuoteTotal browser event, which fires before the call's promise settles.
+             * Resolves null if no total arrived (drift detection then stands down).
+             */
+            fetchQuoteTotal: function() {
+                this._quoteTotal = null;
+
+                return this.\$wire.call('loadQuoteTotal').then(() => this._quoteTotal);
+            },
+            handleQuoteTotal: function(event) {
+                this._quoteTotal = event?.detail?.total ?? null;
+            },
             isCurrentGeneration: function(generation) {
                 return generation === this._generation;
             },
@@ -786,7 +803,7 @@ $inlineScript = <<<JS
                     // (coupon, shipping change) since the mount, force re-entry against a fresh,
                     // correctly-priced context instead of authorizing a mismatched amount.
                     try {
-                        const total = await this.\$wire.call('getQuoteTotal');
+                        const total = await this.fetchQuoteTotal();
 
                         if (this.mountTotal !== null && total !== this.mountTotal) {
                             this.remountDropin();

@@ -146,6 +146,25 @@ class CyberSource extends Form implements EvaluationInterface
     }
 
     /**
+     * Push the quote base grand total to the browser, for capture-context amount drift detection.
+     *
+     * Magewire 1.x discards method return values, so the total is delivered as a browser event
+     * rather than returned from a client-called method.
+     *
+     * @throws \Magento\Framework\Exception\LocalizedException
+     * @throws \Magento\Framework\Exception\NoSuchEntityException
+     */
+    public function loadQuoteTotal(): void
+    {
+        $this->dispatchBrowserEvent(
+            static::METHOD_CODE . 'QuoteTotal',
+            [
+                'total' => $this->getQuoteTotal(),
+            ]
+        );
+    }
+
+    /**
      * Get the quote base grand total, for client-side capture-context amount drift detection.
      *
      * The capture mandate amount is baked into the capture context (and any transient token minted
