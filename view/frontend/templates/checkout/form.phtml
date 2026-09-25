@@ -70,7 +70,7 @@ $image = $formBlock->getBrandingImage();
             <template x-if="newCardEntered">
                 <option value="unified_checkout_new"
                         :selected="isNewCardSelected"
-                        x-text="getNewCardLabel()"></option>
+                        x-text="getNewCardLabel"></option>
             </template>
             <option value=""><?= $escaper->escapeHtml(__('Add new card')) ?></option>
         </select>
@@ -115,7 +115,8 @@ $image = $formBlock->getBrandingImage();
                    class="block w-16 shadow-sm border-gray-300 rounded-md font-mono font-medium leading-normal tracking-wider transition text-center"
                    id="<?= /* @noEscape */ $code ?>-cc-cid"
                    name="payment[cc_cid]"
-                   x-model="ccCid"
+                   :value="ccCid"
+                   @input="setCcCid"
                    @change="validateCvv"
                    value=""
                    autocomplete="cc-csc"
@@ -142,7 +143,8 @@ $image = $formBlock->getBrandingImage();
                        name="payment[save]"
                        value="1"
                        class="checkbox"
-                       x-model="save"
+                       :checked="save"
+                       @change="setSave"
                 />
                 <label for="<?= /* @noEscape */ $code ?>-save" class="label text-sm">
                     <?= $escaper->escapeHtml(__('Save for next time')) ?>
