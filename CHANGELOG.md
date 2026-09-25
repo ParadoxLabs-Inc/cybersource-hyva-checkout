@@ -7,6 +7,8 @@
   a browser event, and a new card entered before a total change (coupon, shipping) is re-collected as intended.
 - Fixed the stored-card select showing "Add new card" while a stored card was preselected, which hid the Unified
   Checkout drop-in and showed the stored-card CVV field instead.
+- Fixed the stored-card CVV and "Save for next time" fields never reaching the payment form under Hyvä Checkout's CSP
+  Alpine build, which made stored-card orders with CVV required do nothing on Place Order.
 - Fixed "The payment form could not be loaded" appearing (after two silent drop-in reloads) whenever Unified Checkout
   offers more than one payment type, such as Google Pay: the mount check only looked at the card-entry container,
   which stays empty until a payment button is chosen. Affected checkout and My Payment Options.
