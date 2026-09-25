@@ -5,6 +5,8 @@
 - Fixed capture-context total drift detection never firing on Hyvä Checkout. Magewire does not return component
   method results to the browser, so the mount and submit totals always read as null; the total is now delivered via
   a browser event, and a new card entered before a total change (coupon, shipping) is re-collected as intended.
+- Fixed the stored-card select showing "Add new card" while a stored card was preselected, which hid the Unified
+  Checkout drop-in and showed the stored-card CVV field instead.
 
 ## 1.0.0 - Aug 11, 2026
 
