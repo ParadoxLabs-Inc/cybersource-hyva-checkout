@@ -1148,6 +1148,9 @@ $inlineScript = <<<JS
             getCcCidPlaceholder() {return this.state.cc_cid_length === 4 ? '0000' : '000'},
             showDropin() {return this.selectedCard === ''},
             showStoredCards() {return Object.keys(this.storedCards).length > 0 || this.newCardEntered},
+            isStoredCardSelected() {return this.storedCard.hash === this.selectedCard},
+            isNewCardSelected() {return this.selectedCard === NEW_CARD_ID},
+            setSelectedCard() {return this.selectedCard = this.\$el.value},
             showCvvField() {return !!this.selectedCard && this.selectedCard !== NEW_CARD_ID},
             showSaveOption() {
                 if (!this.config.canSaveCard) {

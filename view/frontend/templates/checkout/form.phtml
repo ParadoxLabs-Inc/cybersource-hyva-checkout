@@ -57,16 +57,20 @@ $image = $formBlock->getBrandingImage();
         </label>
         <select id="<?= /* @noEscape */ $code ?>-card-id"
                 class="block w-full shadow-sm border-gray-300 rounded-md"
-                x-model="selectedCard"
+                :value="selectedCard"
+                @change="setSelectedCard"
         >
             <template x-for="storedCard in storedCards" :key="storedCard.hash">
                 <option :value="storedCard.hash"
                         :data-type="storedCard.type"
+                        :selected="isStoredCardSelected"
                         x-text="storedCard.label">
                 </option>
             </template>
             <template x-if="newCardEntered">
-                <option value="unified_checkout_new" x-text="getNewCardLabel()"></option>
+                <option value="unified_checkout_new"
+                        :selected="isNewCardSelected"
+                        x-text="getNewCardLabel()"></option>
             </template>
             <option value=""><?= $escaper->escapeHtml(__('Add new card')) ?></option>
         </select>
