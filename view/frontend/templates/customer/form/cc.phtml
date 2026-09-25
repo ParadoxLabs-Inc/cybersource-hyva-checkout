@@ -133,16 +133,24 @@ $tLoadFailed  = $escaper->escapeJs(__('The payment form could not be loaded. Ple
                     this.teardownDropin();
                 },
 
+                // UC renders the payment selection list into the selection container and only fills
+                // the screen container once a button is chosen, so either one counts (as on Luma).
                 isDropinMounted() {
-                    const screen = document.getElementById('<?= /* @noEscape */ $code ?>_uc_screen');
+                    return this.isContainerHealthy(
+                        document.getElementById('<?= /* @noEscape */ $code ?>_uc_selection')
+                    ) || this.isContainerHealthy(
+                        document.getElementById('<?= /* @noEscape */ $code ?>_uc_screen')
+                    );
+                },
 
-                    if (!screen || screen.children.length === 0) {
+                isContainerHealthy(container) {
+                    if (!container || container.children.length === 0) {
                         return false;
                     }
 
                     // A visible container at zero height is a dead mount (0x0 iframe); hidden but
                     // populated is legitimately unmeasurable and counts as mounted.
-                    return screen.offsetParent === null || screen.getBoundingClientRect().height > 0;
+                    return container.offsetParent === null || container.getBoundingClientRect().height > 0;
                 },
 
                 mountDropin() {

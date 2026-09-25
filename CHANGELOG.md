@@ -7,6 +7,9 @@
   a browser event, and a new card entered before a total change (coupon, shipping) is re-collected as intended.
 - Fixed the stored-card select showing "Add new card" while a stored card was preselected, which hid the Unified
   Checkout drop-in and showed the stored-card CVV field instead.
+- Fixed "The payment form could not be loaded" appearing (after two silent drop-in reloads) whenever Unified Checkout
+  offers more than one payment type, such as Google Pay: the mount check only looked at the card-entry container,
+  which stays empty until a payment button is chosen. Affected checkout and My Payment Options.
 
 ## 1.0.0 - Aug 11, 2026
 

@@ -170,19 +170,26 @@ $inlineScript = <<<JS
             },
 
             /**
-             * Whether the drop-in is mounted AND usable. The UC iframe can attach at 0x0, leaving no
-             * visible payment UI while a children-only check reports "mounted" forever — so a visible
-             * container at zero height counts as unmounted. A hidden-but-healthy mount legitimately
-             * measures zero, hence the visibility qualifier.
+             * Whether the drop-in is mounted AND usable, in either container: UC renders the payment
+             * selection list (wallet + "Pay with card" buttons) into the selection container and only
+             * fills the screen container once a button is chosen. Matches the Luma renderer.
              */
             isDropinMounted: function() {
-                const screen = document.getElementById('{$code}_uc_screen');
+                return this.isContainerHealthy(document.getElementById('{$code}_uc_selection'))
+                    || this.isContainerHealthy(document.getElementById('{$code}_uc_screen'));
+            },
 
-                if (!screen || screen.children.length === 0) {
+            /**
+             * The UC iframe can attach at 0x0, leaving no visible payment UI while a children-only check
+             * reports "mounted" forever — so a visible container at zero height counts as unmounted. A
+             * hidden-but-healthy mount legitimately measures zero, hence the visibility qualifier.
+             */
+            isContainerHealthy: function(container) {
+                if (!container || container.children.length === 0) {
                     return false;
                 }
 
-                return screen.offsetParent === null || screen.getBoundingClientRect().height > 0;
+                return container.offsetParent === null || container.getBoundingClientRect().height > 0;
             },
 
             maybeMountDropin: function() {
