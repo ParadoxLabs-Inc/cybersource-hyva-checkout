@@ -1,6 +1,6 @@
 # ParadoxLabs_CyberSourceHyvaCheckout Changelog
 
-## 1.0.1 - Unreleased
+## 1.0.1 - Sep 29, 2026
 
 - Fixed capture-context total drift detection never firing on Hyvä Checkout. Magewire does not return component
   method results to the browser, so the mount and submit totals always read as null; the total is now delivered via
