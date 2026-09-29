@@ -222,6 +222,11 @@ $inlineScript = <<<JS
                     if (this.isCurrentGeneration(generation)) {
                         this.mountTotal = total;
                     }
+                }).catch(() => {
+                    // Magewire request failed: leave mountTotal null so drift detection stands down.
+                    if (this.isCurrentGeneration(generation)) {
+                        this.mountTotal = null;
+                    }
                 });
 
                 this._abortController = new AbortController();
