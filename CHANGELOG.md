@@ -1,5 +1,9 @@
 # ParadoxLabs_CyberSourceHyvaCheckout Changelog
 
+## 1.1.0 - Nov 16, 2026
+
+- Added Hyvä Checkout 3.x support (3.0.1+). Requires Hyvä's `Hyva_CheckoutV1bc` module, enabled by default.
+
 ## 1.0.1 - Sep 29, 2026
 
 - Fixed capture-context total drift detection never firing on Hyvä Checkout. Magewire does not return component
