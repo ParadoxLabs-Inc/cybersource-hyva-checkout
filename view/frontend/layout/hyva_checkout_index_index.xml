@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<page xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:View/Layout/etc/page_configuration.xsd">
+    <body>
+        <!-- Payment JS: rendered with the checkout API on Hyva Checkout 1.3.6+ and 3.x, with or without v1bc. -->
+        <referenceContainer name="hyva.checkout.api-v1.payment-methods">
+            <block class="ParadoxLabs\CyberSourceHyvaCheckout\Block\CheckoutTemplate" name="script-paradoxlabs_cybersource" ifconfig="payment/paradoxlabs_cybersource/active">
+                <arguments>
+                    <argument name="method_code" xsi:type="string">paradoxlabs_cybersource</argument>
+                    <argument name="template" xsi:type="string">ParadoxLabs_CyberSourceHyvaCheckout::checkout/scripts.phtml</argument>
+                </arguments>
+            </block>
+        </referenceContainer>
+    </body>
+</page>

@@ -176,6 +176,30 @@ class CyberSourceTest extends TestCase
         );
     }
 
+    /**
+     * triggerBillingUpdate is a listener: Magewire 3 passes the event payload as named arguments
+     * (billing_address_activated sends `id:`), Magewire 1 as positional ones.
+     */
+    public function testTriggerBillingUpdateAcceptsListenerPayloadsOfBothMagewireVersions(): void
+    {
+        $this->component->triggerBillingUpdate(id: 5);
+        $this->component->triggerBillingUpdate(['id' => 5]);
+
+        $this->assertSame(
+            [
+                [
+                    'event' => 'paradoxlabs_cybersourceBillingUpdated',
+                    'data' => [],
+                ],
+                [
+                    'event' => 'paradoxlabs_cybersourceBillingUpdated',
+                    'data' => [],
+                ],
+            ],
+            $this->browserEvents
+        );
+    }
+
     public function testEvaluateCompletionRegistersMethodValidator(): void
     {
         $validation = $this->createMock(Validation::class);

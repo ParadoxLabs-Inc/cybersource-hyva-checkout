@@ -28,6 +28,7 @@ use Magento\Checkout\Model\Session as CheckoutSession;
 use Magento\Payment\Model\MethodInterface;
 use Magento\Quote\Api\Data\CartInterface;
 use Magewirephp\Magewire\Component\Form;
+use Magewirephp\Magewire\Features\SupportMagewireBackwardsCompatibility\HandleBackwardsCompatibility;
 use ParadoxLabs\CyberSourceHyvaCheckout\ViewModel\PaymentForm;
 use ParadoxLabs\TokenBase\Api\CardRepositoryInterface;
 use ParadoxLabs\TokenBase\Api\Data\CardInterface;
@@ -41,7 +42,10 @@ use Throwable;
  * Card entry happens client-side in the UC drop-in (see scripts.phtml); this component owns the
  * stored-card list, the place-order evaluation, and the server-side quote data the client needs
  * to keep the capture context honest (grand total drift detection at submit).
+ *
+ * Native Magewire 3 on Hyva Checkout 3.x, with or without v1bc; Magewire 1 (Checkout 1.x) ignores the attribute.
  */
+#[HandleBackwardsCompatibility(enabled: false)]
 class CyberSource extends Form implements EvaluationInterface
 {
     protected const METHOD_CODE = 'paradoxlabs_cybersource';
@@ -139,8 +143,11 @@ class CyberSource extends Form implements EvaluationInterface
     /**
      * Notify the browser that the billing address changed, so the drop-in can mount or re-mint
      * its capture context against the updated billTo.
+     *
+     * @param mixed ...$eventData Listener payload, unused: positional on Magewire 1, named on Magewire 3.
+     * @SuppressWarnings(PHPMD.UnusedFormalParameter)
      */
-    public function triggerBillingUpdate(): void
+    public function triggerBillingUpdate(mixed ...$eventData): void
     {
         $this->dispatchBrowserEvent(static::METHOD_CODE . 'BillingUpdated', []);
     }

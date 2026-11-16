@@ -2,7 +2,8 @@
 
 ## 1.1.0 - Nov 16, 2026
 
-- Added Hyvä Checkout 3.x support (3.0.1+). Requires Hyvä's `Hyva_CheckoutV1bc` module, enabled by default.
+- Added Hyvä Checkout 3.x support (3.0.1+), native to Magewire 3; Hyvä's v1bc module is not required.
+- Now requires Hyvä Checkout 1.3.6 or later on the 1.x line.
 
 ## 1.0.1 - Sep 29, 2026
 

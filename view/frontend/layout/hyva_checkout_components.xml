@@ -19,13 +19,5 @@
                 </arguments>
             </block>
         </referenceBlock>
-        <referenceContainer name="magewire.plugin.scripts">
-            <block class="ParadoxLabs\CyberSourceHyvaCheckout\Block\CheckoutTemplate" name="script-paradoxlabs_cybersource" ifconfig="payment/paradoxlabs_cybersource/active">
-                <arguments>
-                    <argument name="method_code" xsi:type="string">paradoxlabs_cybersource</argument>
-                    <argument name="template" xsi:type="string">ParadoxLabs_CyberSourceHyvaCheckout::checkout/scripts.phtml</argument>
-                </arguments>
-            </block>
-        </referenceContainer>
     </body>
 </page>
