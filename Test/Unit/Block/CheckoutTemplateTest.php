@@ -143,12 +143,10 @@ class CheckoutTemplateTest extends TestCase
         $mask = $this->getMockBuilder(QuoteIdMask::class)
             ->disableOriginalConstructor()
             ->onlyMethods(['load'])
-            ->addMethods(['getMaskedId'])
             ->getMock();
         $mask->method('load')
             ->willReturnSelf();
-        $mask->method('getMaskedId')
-            ->willReturn($maskedId);
+        $mask->setData('masked_id', $maskedId);
 
         $this->quoteIdMaskFactory->method('create')
             ->willReturn($mask);
