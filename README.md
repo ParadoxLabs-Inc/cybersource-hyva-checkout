@@ -15,6 +15,9 @@ Requirements
 * Adobe Commerce / Magento Open Source 2.4.6 – 2.4.9 (or equivalent version of Adobe Commerce Cloud), or Mage-OS 2.0 – 3.0
 * PHP 8.1, 8.2, 8.3, 8.4, or 8.5
 * Hyva Checkout (separate product and license), `hyva-themes/magento2-hyva-checkout` 1.3.6 or later 1.3.x, or 3.0.1 and later
+* Hyva Checkout 3.0.1 on a store with store codes in its URLs, or installed in a subdirectory, also needs the
+  Magewire fix from [magewirephp/magewire#324](https://github.com/magewirephp/magewire/pull/324) (not in
+  Magewire 3.7.2); without it, every checkout update falls back to the default store.
 * `hyva-themes/magento2-theme-module` >= 1.3.11
 * `hyva-themes/magento2-payment-icons` >= 2.0
 * `paradoxlabs/cybersource` ^4.0
@@ -104,19 +107,13 @@ the client falls through to its terminal path and resets the form for another ca
 doomed 3-D Secure round-trip. A transient token is single-use and its capture context is spent once submitted,
 so a declined new-card attempt is never resubmitted.
 
-Known Limitations (TODO)
-========================
+Known Limitations
+=================
 
-Pre-release caveats — verify before relying on these in production:
-
-* **TODO: Live install verification.** This module has not yet been exercised against a running Hyva Checkout
-  install. Two assumptions need confirmation there: Magewire `$wire` action return values resolving through the
-  call promise (standard Livewire v2 semantics), and `dispatchBrowserEvent` delivery (the template defensively
-  listens on `window`).
-* **TODO: Browser QA of the Payer Authentication matrix** (frictionless, device-data-collection degrade,
-  step-up challenge, challenge-abandoned, and decline-after-challenge).
-* **TODO: $0-total checkout.** A $0 quote depends on the base module minting a capture context for the drop-in;
-  confirm the drop-in renders and the $0 card-storage authorization succeeds on Hyva.
+* Payer Authentication outcomes beyond the standard flow (device-data-collection degrade, challenge-abandoned,
+  decline-after-challenge) have not been browser-tested on Hyva Checkout.
+* $0-total checkout has not been tested on Hyva Checkout; it depends on the base module minting a capture context
+  for the drop-in.
 * `Require Payer Authentication` (base module, default off) refuses orders placed without *attempting* Payer
   Authentication. Confirm the Hyva place flow satisfies it — the client runs authentication before placement.
 
