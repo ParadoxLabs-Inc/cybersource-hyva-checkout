@@ -57,12 +57,15 @@ class CyberSource extends Form implements EvaluationInterface
         = [
             'billing_address_activated' => 'Loading payment form',
             'billing_address_saved' => 'Loading payment form',
-            'billing_address_submitted' => 'Loading payment form',
         ];
 
     /**
      * The capture context's billTo is sourced from the quote billing address, so any billing
      * change invalidates a not-yet-used context; signal the browser so the drop-in can (re)mount.
+     *
+     * Not billing_address_submitted: Hyvä always sends it alongside billing_address_saved, and
+     * listening to it queues this component ahead of checkout.payment.methods in the same update,
+     * whose re-render then replaces this component's root with a copy lacking wire:id (Magewire 3).
      *
      * @var string[]
      */
@@ -70,7 +73,6 @@ class CyberSource extends Form implements EvaluationInterface
         = [
             'billing_address_activated' => 'triggerBillingUpdate',
             'billing_address_saved' => 'triggerBillingUpdate',
-            'billing_address_submitted' => 'triggerBillingUpdate',
         ];
 
     /* Public component properties */
